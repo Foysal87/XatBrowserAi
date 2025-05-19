@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- Background circle -->
+    <circle cx="64" cy="64" r="60" fill="#007AFF"/>
+    
+    <!-- Browser window -->
+    <rect x="24" y="32" width="80" height="64" rx="4" fill="white"/>
+    
+    <!-- Browser controls -->
+    <circle cx="36" cy="40" r="4" fill="#FF3B30"/>
+    <circle cx="48" cy="40" r="4" fill="#FFCC00"/>
+    <circle cx="60" cy="40" r="4" fill="#34C759"/>
+    
+    <!-- AI brain symbol -->
+    <path d="M64 48C58.477 48 54 52.477 54 58C54 63.523 58.477 68 64 68C69.523 68 74 63.523 74 58C74 52.477 69.523 48 64 48ZM64 66C59.582 66 56 62.418 56 58C56 53.582 59.582 50 64 50C68.418 50 72 53.582 72 58C72 62.418 68.418 66 64 66Z" fill="#007AFF"/>
+    <path d="M64 52C61.791 52 60 53.791 60 56C60 58.209 61.791 60 64 60C66.209 60 68 58.209 68 56C68 53.791 66.209 52 64 52Z" fill="#007AFF"/>
+    
+    <!-- Connection lines -->
+    <path d="M64 60L64 68" stroke="#007AFF" stroke-width="2"/>
+    <path d="M56 58L72 58" stroke="#007AFF" stroke-width="2"/>
+    <path d="M60 56L68 56" stroke="#007AFF" stroke-width="2"/>
+</svg> 
