@@ -469,9 +469,21 @@ chrome.runtime.onConnect.addListener((port) => {
                 return;
             }
 
-            // Create system message explaining the limited information available
-            const systemMessage = `You are a helpful AI assistant browsing with the user. For privacy reasons, you only have access to basic information about the tabs they have open (URLs and titles), not the full content. Here are the tabs the user currently has open:\n\n${context}\n\nProvide assistance based on this limited information, and if the user asks about specific content within these pages, kindly explain that you don't have access to the full content of the pages for privacy reasons.`;
+            // Create system message with current page and tab information
+            let systemMessage = `You are a helpful AI assistant browsing with the user. Here is information about the current page and other open tabs:\n\n`;
             
+            // Add current page information if available
+            if (message.pageUrl && message.pageTitle) {
+                systemMessage += `## Current Page
+**Title:** ${message.pageTitle}
+**URL:** ${message.pageUrl}
+${message.pageHtml ? `\n### Page Content\n\`\`\`html\n${message.pageHtml}\n\`\`\`` : ''}\n\n`;
+            }
+            
+            // Add other tabs information
+            systemMessage += `## Other Open Tabs\n${context}\n\n`;
+            systemMessage += `Provide assistance based on this information. If the user asks about specific content within other pages (not the current page), kindly explain that you don't have access to the full content of those pages for privacy reasons.`;
+
             // Stream processing functions
             const processStreamChunk = (chunk) => {
                 try {
@@ -580,7 +592,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 async function handleMessage(request, sender, sendResponse) {
-    const { message, threadId, modelId } = request;
+    const { message, threadId, modelId, pageHtml, pageUrl, pageTitle } = request;
     
     if (!message || !modelId) {
         sendResponse({ error: 'Message and model ID are required' });
@@ -631,8 +643,20 @@ async function handleMessage(request, sender, sendResponse) {
             throw new Error('Selected model not found in configuration');
         }
 
-        // Create a descriptive system message about the tabs
-        const systemMessage = `You are a helpful AI assistant browsing with the user. For privacy reasons, you only have access to basic information about the tabs they have open (URLs and titles), not the full content. Here are the tabs the user currently has open:\n\n${context}\n\nProvide assistance based on this limited information, and if the user asks about specific content within these pages, kindly explain that you don't have access to the full content of the pages for privacy reasons.`;
+        // Create a descriptive system message about the tabs and current page
+        let systemMessage = `You are a helpful AI assistant browsing with the user. Here is information about the current page and other open tabs:\n\n`;
+        
+        // Add current page information if available
+        if (pageUrl && pageTitle) {
+            systemMessage += `## Current Page
+**Title:** ${pageTitle}
+**URL:** ${pageUrl}
+${pageHtml ? `\n### Page Content\n\`\`\`html\n${pageHtml}\n\`\`\`` : ''}\n\n`;
+        }
+        
+        // Add other tabs information
+        systemMessage += `## Other Open Tabs\n${context}\n\n`;
+        systemMessage += `Provide assistance based on this information. If the user asks about specific content within other pages (not the current page), kindly explain that you don't have access to the full content of those pages for privacy reasons.`;
 
         // Create streaming callback with debugging
         const onStream = (chunk) => {

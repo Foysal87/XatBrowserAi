@@ -618,6 +618,77 @@ class SidebarUI {
         this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 100) + 'px';
     }
 
+    preprocessHtml() {
+        // Create a temporary div to work with the HTML
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = document.documentElement.innerHTML;
+
+        // Remove unnecessary elements
+        const elementsToRemove = [
+            'script', 'style', 'noscript', 'iframe', 'svg', 'canvas',
+            'link', 'meta', 'head', 'footer', 'nav', 'aside',
+            '[style*="display: none"]', '[style*="visibility: hidden"]',
+            '[aria-hidden="true"]', '[role="presentation"]'
+        ];
+
+        elementsToRemove.forEach(selector => {
+            const elements = tempDiv.querySelectorAll(selector);
+            elements.forEach(el => el.remove());
+        });
+
+        // Remove empty elements and comments
+        const removeEmptyElements = (element) => {
+            const children = Array.from(element.children);
+            children.forEach(child => {
+                // Remove empty elements (no text content and no non-empty children)
+                if (!child.textContent.trim() && !child.querySelector('img, video, input, button')) {
+                    child.remove();
+                } else {
+                    removeEmptyElements(child);
+                }
+            });
+        };
+
+        removeEmptyElements(tempDiv);
+
+        // Remove inline styles and classes
+        const removeAttributes = (element) => {
+            const children = Array.from(element.children);
+            children.forEach(child => {
+                child.removeAttribute('style');
+                child.removeAttribute('class');
+                child.removeAttribute('id');
+                removeAttributes(child);
+            });
+        };
+
+        removeAttributes(tempDiv);
+
+        // Get only the main content
+        let mainContent = '';
+        const mainSelectors = ['main', 'article', '[role="main"]', '#content', '.content', '#main', '.main'];
+        
+        for (const selector of mainSelectors) {
+            const element = tempDiv.querySelector(selector);
+            if (element) {
+                mainContent = element.textContent.trim();
+                break;
+            }
+        }
+
+        // If no main content found, get body content
+        if (!mainContent) {
+            mainContent = tempDiv.textContent.trim();
+        }
+
+        // Clean up the text content
+        return mainContent
+            .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
+            .replace(/\n+/g, '\n') // Replace multiple newlines with single newline
+            .trim()
+            .substring(0, 50000);  // Limit content length
+    }
+
     async sendMessage() {
         const message = this.messageInput.value.trim();
         if (!message || !this.modelSelector.value) {
@@ -639,42 +710,53 @@ class SidebarUI {
             // Show typing indicator
             this.showTypingIndicator();
 
-            // Get the page HTML
-            const pageHtml = document.documentElement.outerHTML;
+            // Get preprocessed page content
+            const pageContent = this.preprocessHtml();
+            const pageUrl = document.location.href;
+            const pageTitle = document.title;
 
-            // Send message to background script
-            const response = await this.sendMessageToBackground({
+            // Create a port for streaming
+            const port = chrome.runtime.connect({ name: 'chat' });
+            
+            // Set up port message listener
+            port.onMessage.addListener((response) => {
+                if (response.error) {
+                    this.hideTypingIndicator();
+                    this.addMessage(`Error: ${response.error}`, 'assistant', true);
+                    this.showNotification('Error: ' + response.error);
+                    port.disconnect();
+                    this.setUIState(true);  // Re-enable UI on error
+                } else if (response.done) {
+                    this.hideTypingIndicator();
+                    port.disconnect();
+                    this.setUIState(true);  // Re-enable UI when done
+                } else if (response.type === 'delta' && response.content) {
+                    // Handle streaming content
+                    const lastMessage = this.messages.querySelector('.assistant-message:last-child');
+                    if (lastMessage && lastMessage.querySelector('.message-content')) {
+                        lastMessage.querySelector('.message-content').textContent += response.content;
+                    } else {
+                        this.addMessage(response.content, 'assistant');
+                    }
+                    this.scrollToBottom();
+                }
+            });
+
+            // Send message to background script with streaming
+            port.postMessage({
                 type: 'PROCESS_MESSAGE',
                 message: message,
                 modelId: this.modelSelector.value,
-                pageHtml: pageHtml
+                pageContent: pageContent,
+                pageUrl: pageUrl,
+                pageTitle: pageTitle
             });
 
-            // Hide typing indicator
-            this.hideTypingIndicator();
-
-            // Add assistant's response to chat
-            if (response.error) {
-                this.addMessage(`Error: ${response.error}`, 'assistant', true);
-                this.showNotification('Error: ' + response.error);
-            } else if (typeof response.message === 'string') {
-                this.addMessage(response.message, 'assistant');
-            } else if (response.message && typeof response.message === 'object') {
-                // Handle object response
-                const messageText = response.message.content || 
-                                  response.message.text || 
-                                  JSON.stringify(response.message, null, 2);
-                this.addMessage(messageText, 'assistant');
-            } else {
-                this.addMessage('Received invalid response format', 'assistant', true);
-            }
         } catch (error) {
             console.error('Error sending message:', error);
             this.hideTypingIndicator();
             this.addMessage(`Error: ${error.message}`, 'assistant', true);
             this.showNotification('Error: ' + error.message);
-        } finally {
-            // Re-enable input and button
             this.setUIState(true);
         }
     }
