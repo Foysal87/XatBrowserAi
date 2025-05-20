@@ -510,11 +510,11 @@ class SidebarUI {
                 newLeft = Math.max(0, Math.min(window.innerWidth - newWidth, newLeft));
                 newTop = Math.max(0, Math.min(window.innerHeight - newHeight, newTop));
                 this.sidebar.style.width = newWidth + 'px';
-                this.style.height = newHeight + 'px';
-                this.style.left = newLeft + 'px';
-                this.style.top = newTop + 'px';
-                this.style.right = '';
-                this.style.bottom = '';
+                this.sidebar.style.height = newHeight + 'px';
+                this.sidebar.style.left = newLeft + 'px';
+                this.sidebar.style.top = newTop + 'px';
+                this.sidebar.style.right = '';
+                this.sidebar.style.bottom = '';
             }
         };
         const stopResize = () => {
