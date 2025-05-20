@@ -410,6 +410,7 @@ class SidebarUI {
         this.messageInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter' && !e.shiftKey && !this.sendButton.disabled) {
                 e.preventDefault();
+                e.stopPropagation();
                 this.sendMessage();
             }
         });
@@ -554,6 +555,12 @@ class SidebarUI {
                 this.sidebar.style.height = `${window.innerHeight - 40}px`;
             }
         });
+
+        ['keydown', 'keyup', 'keypress'].forEach(eventType => {
+            this.messageInput.addEventListener(eventType, (e) => {
+                e.stopPropagation();
+            });
+        });
     }
 
     async loadConfig() {
@@ -632,11 +639,15 @@ class SidebarUI {
             // Show typing indicator
             this.showTypingIndicator();
 
+            // Get the page HTML
+            const pageHtml = document.documentElement.outerHTML;
+
             // Send message to background script
             const response = await this.sendMessageToBackground({
                 type: 'PROCESS_MESSAGE',
                 message: message,
-                modelId: this.modelSelector.value
+                modelId: this.modelSelector.value,
+                pageHtml: pageHtml
             });
 
             // Hide typing indicator
