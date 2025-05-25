@@ -117,6 +117,37 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
             return true;
 
+        case 'GET_TAB_INFO':
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                const tab = tabs[0];
+                sendResponse({ id: tab.id, url: tab.url, title: tab.title });
+            });
+            return true;
+
+        case 'GET_PAGE_HTML':
+            chrome.scripting
+                .executeScript({
+                    target: { tabId: sender.tab.id },
+                    func: () => document.documentElement.outerHTML
+                })
+                .then((res) => sendResponse({ html: res[0].result }))
+                .catch((err) => sendResponse({ error: err.message }));
+            return true;
+
+        case 'OPEN_TAB':
+            chrome.tabs.create({ url: request.url || 'about:blank' }, (tab) => {
+                sendResponse({ success: true, tabId: tab.id });
+            });
+            return true;
+
+        case 'SEARCH_WEB':
+            const searchUrl = 'https://www.google.com/search?q=' +
+                encodeURIComponent(request.query || '');
+            chrome.tabs.create({ url: searchUrl }, (tab) => {
+                sendResponse({ success: true, tabId: tab.id, url: searchUrl });
+            });
+            return true;
+
         case 'EXECUTE_ACTION':
             // Handle action execution requests
             handleActionExecution(request.action, sender.tab.id)
@@ -483,6 +514,12 @@ ${message.pageHtml ? `\n### Page Content\n\`\`\`html\n${message.pageHtml}\n\`\`\
             // Add other tabs information
             systemMessage += `## Other Open Tabs\n${context}\n\n`;
             systemMessage += `Provide assistance based on this information. If the user asks about specific content within other pages (not the current page), kindly explain that you don't have access to the full content of those pages for privacy reasons.`;
+            systemMessage += `\n\nAvailable tools:\n` +
+                `- openTab(url)\n` +
+                `- searchWeb(query)\n` +
+                `- getActiveTabInfo()\n` +
+                `- getActiveTabHtml()\n` +
+                `Respond with a JSON object like {"tool":"openTab","input":"https://example.com"} when you want to run a tool.`;
 
             // Stream processing functions
             const processStreamChunk = (chunk) => {
@@ -657,6 +694,12 @@ ${pageHtml ? `\n### Page Content\n\`\`\`html\n${pageHtml}\n\`\`\`` : ''}\n\n`;
         // Add other tabs information
         systemMessage += `## Other Open Tabs\n${context}\n\n`;
         systemMessage += `Provide assistance based on this information. If the user asks about specific content within other pages (not the current page), kindly explain that you don't have access to the full content of those pages for privacy reasons.`;
+        systemMessage += `\n\nAvailable tools:\n` +
+            `- openTab(url)\n` +
+            `- searchWeb(query)\n` +
+            `- getActiveTabInfo()\n` +
+            `- getActiveTabHtml()\n` +
+            `Respond with a JSON object like {"tool":"openTab","input":"https://example.com"} when you want to run a tool.`;
 
         // Create streaming callback with debugging
         const onStream = (chunk) => {
