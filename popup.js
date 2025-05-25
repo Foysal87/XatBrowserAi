@@ -18,6 +18,7 @@ class PopupUI {
         this.statusDot = document.getElementById('statusDot');
         this.statusText = document.getElementById('statusText');
         this.mouseTracker = document.getElementById('mouseTracker');
+        this.openSidebarButton = document.getElementById('openSidebarButton');
     }
 
     attachEventListeners() {
@@ -29,6 +30,7 @@ class PopupUI {
                 this.sendMessage();
             }
         });
+        this.openSidebarButton.addEventListener('click', () => this.openSidebar());
     }
 
     async loadModels() {
@@ -128,6 +130,10 @@ class PopupUI {
         this.sendButton.disabled = isProcessing;
         this.modelSelector.disabled = isProcessing;
         this.updateStatus(isProcessing ? 'Processing...' : 'Ready', !isProcessing);
+    }
+
+    openSidebar() {
+        chrome.runtime.sendMessage({ type: 'OPEN_SIDEBAR' });
     }
 
     animateMouseMovements(movements) {
