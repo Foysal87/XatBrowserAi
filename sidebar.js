@@ -13,13 +13,7 @@ class SidebarUI {
         this.attachEventListeners();
         this.loadConfig();
         this.loadPosition();
-        // Show the sidebar initially with animation
-        this.sidebar.style.display = 'flex';
-        this.sidebar.style.opacity = '0';
-        requestAnimationFrame(() => {
-            this.sidebar.style.opacity = '1';
-            this.sidebar.style.transform = 'translate(0, 0)';
-        });
+        this.loadSidebarState();
     }
 
     initializeElements() {
@@ -70,6 +64,41 @@ class SidebarUI {
         this.statusText.className = 'status-text';
         this.statusText.textContent = 'Select a model to begin';
         this.statusText.style.cssText = 'font-size: 0.9em; color: rgba(255, 255, 255, 0.8);';
+
+        // Create tool panel with quick actions
+        this.toolPanel = document.createElement('div');
+        this.toolPanel.className = 'tool-panel';
+        this.tools = [
+            {
+                icon: '🗂',
+                label: 'Open Tab',
+                action: () => this.sendMessageToBackground({ type: 'OPEN_TAB', url: 'https://example.com' })
+                    .then(() => this.showNotification('Opened new tab'))
+            },
+            {
+                icon: 'ℹ️',
+                label: 'Tab Info',
+                action: async () => {
+                    const info = await this.sendMessageToBackground({ type: 'GET_TAB_INFO' });
+                    if (info && info.title) {
+                        this.showNotification(info.title);
+                    }
+                }
+            },
+            {
+                icon: '📄',
+                label: 'Page HTML',
+                action: () => this.sendMessageToBackground({ type: 'GET_PAGE_HTML' })
+                    .then(() => this.showNotification('HTML retrieved'))
+            }
+        ];
+        this.tools.forEach(t => {
+            const btn = document.createElement('div');
+            btn.className = 'tool-button';
+            btn.innerHTML = `<span class="tool-icon">${t.icon}</span><span class="tool-label">${t.label}</span>`;
+            btn.addEventListener('click', t.action);
+            this.toolPanel.appendChild(btn);
+        });
 
         // Create messages container with modern scrollbar
         this.messages = document.createElement('div');
@@ -311,6 +340,32 @@ class SidebarUI {
             .typing-dot:nth-child(1) { animation-delay: 0s; }
             .typing-dot:nth-child(2) { animation-delay: 0.2s; }
             .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+            .tool-panel {
+                display: flex;
+                justify-content: space-around;
+                padding: 10px 20px;
+                background: rgba(42,42,42,0.4);
+                border-bottom: 1px solid var(--glass-border);
+                gap: 10px;
+            }
+            .tool-button {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 4px;
+                font-size: 0.75em;
+                color: #fff;
+                cursor: pointer;
+                padding: 6px 10px;
+                border-radius: 8px;
+                transition: background 0.2s;
+            }
+            .tool-button:hover {
+                background: rgba(255,255,255,0.12);
+            }
+            .tool-icon {
+                font-size: 1.2em;
+            }
             .resize-handle {
                 position: absolute;
                 width: 14px;
@@ -370,6 +425,7 @@ class SidebarUI {
         // Assemble the sidebar structure
         this.sidebar.appendChild(this.dragHandle);
         this.sidebar.appendChild(this.statusIndicator);
+        this.sidebar.appendChild(this.toolPanel);
         this.sidebar.appendChild(this.messages);
         this.sidebar.appendChild(this.inputContainer);
 
@@ -541,6 +597,7 @@ class SidebarUI {
             this.isOpen = false;
             // Notify background script that sidebar is closed
             chrome.runtime.sendMessage({ type: 'SIDEBAR_CLOSED' });
+            chrome.storage.local.set({ sidebarOpen: false });
         });
 
         // Add window resize functionality
@@ -815,9 +872,10 @@ class SidebarUI {
         }
         this.isOpen = !this.isOpen;
         // Notify background script of sidebar state
-        chrome.runtime.sendMessage({ 
-            type: this.isOpen ? 'SIDEBAR_SHOWN' : 'SIDEBAR_CLOSED' 
+        chrome.runtime.sendMessage({
+            type: this.isOpen ? 'SIDEBAR_SHOWN' : 'SIDEBAR_CLOSED'
         });
+        chrome.storage.local.set({ sidebarOpen: this.isOpen });
     }
 
     showNotification(message) {
@@ -902,6 +960,7 @@ class SidebarUI {
         this.isOpen = true;
         // Notify background script that sidebar is shown
         chrome.runtime.sendMessage({ type: 'SIDEBAR_SHOWN' });
+        chrome.storage.local.set({ sidebarOpen: true });
     }
 
     savePosition() {
@@ -921,6 +980,23 @@ class SidebarUI {
                 this.sidebar.style.height = height + 'px';
                 this.sidebar.style.right = '';
                 this.sidebar.style.bottom = '';
+            }
+        });
+    }
+
+    loadSidebarState() {
+        chrome.storage.local.get(['sidebarOpen'], (result) => {
+            const isOpen = result.sidebarOpen !== false; // default to true
+            this.isOpen = isOpen;
+            if (isOpen) {
+                this.sidebar.style.display = 'flex';
+                this.sidebar.style.opacity = '0';
+                requestAnimationFrame(() => {
+                    this.sidebar.style.opacity = '1';
+                    this.sidebar.style.transform = 'translate(0, 0)';
+                });
+            } else {
+                this.sidebar.style.display = 'none';
             }
         });
     }
