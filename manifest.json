@@ -38,6 +38,7 @@
         "agent.js",
         "configManager.js",
         "aiClients.js",
+        "browserTools.js",
         "config/*",
         "settings.html",
         "settings.js"
