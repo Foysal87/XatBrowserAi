@@ -13,13 +13,7 @@ class SidebarUI {
         this.attachEventListeners();
         this.loadConfig();
         this.loadPosition();
-        // Show the sidebar initially with animation
-        this.sidebar.style.display = 'flex';
-        this.sidebar.style.opacity = '0';
-        requestAnimationFrame(() => {
-            this.sidebar.style.opacity = '1';
-            this.sidebar.style.transform = 'translate(0, 0)';
-        });
+        this.loadSidebarState();
     }
 
     initializeElements() {
@@ -603,6 +597,7 @@ class SidebarUI {
             this.isOpen = false;
             // Notify background script that sidebar is closed
             chrome.runtime.sendMessage({ type: 'SIDEBAR_CLOSED' });
+            chrome.storage.local.set({ sidebarOpen: false });
         });
 
         // Add window resize functionality
@@ -877,9 +872,10 @@ class SidebarUI {
         }
         this.isOpen = !this.isOpen;
         // Notify background script of sidebar state
-        chrome.runtime.sendMessage({ 
-            type: this.isOpen ? 'SIDEBAR_SHOWN' : 'SIDEBAR_CLOSED' 
+        chrome.runtime.sendMessage({
+            type: this.isOpen ? 'SIDEBAR_SHOWN' : 'SIDEBAR_CLOSED'
         });
+        chrome.storage.local.set({ sidebarOpen: this.isOpen });
     }
 
     showNotification(message) {
@@ -964,6 +960,7 @@ class SidebarUI {
         this.isOpen = true;
         // Notify background script that sidebar is shown
         chrome.runtime.sendMessage({ type: 'SIDEBAR_SHOWN' });
+        chrome.storage.local.set({ sidebarOpen: true });
     }
 
     savePosition() {
@@ -983,6 +980,23 @@ class SidebarUI {
                 this.sidebar.style.height = height + 'px';
                 this.sidebar.style.right = '';
                 this.sidebar.style.bottom = '';
+            }
+        });
+    }
+
+    loadSidebarState() {
+        chrome.storage.local.get(['sidebarOpen'], (result) => {
+            const isOpen = result.sidebarOpen !== false; // default to true
+            this.isOpen = isOpen;
+            if (isOpen) {
+                this.sidebar.style.display = 'flex';
+                this.sidebar.style.opacity = '0';
+                requestAnimationFrame(() => {
+                    this.sidebar.style.opacity = '1';
+                    this.sidebar.style.transform = 'translate(0, 0)';
+                });
+            } else {
+                this.sidebar.style.display = 'none';
             }
         });
     }
