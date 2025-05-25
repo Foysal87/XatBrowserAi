@@ -10,6 +10,10 @@ export function openNewTab(url) {
     return sendMessage({ type: 'OPEN_TAB', url });
 }
 
+export function searchWeb(query, tabId = null) {
+    return sendMessage({ type: 'SEARCH_WEB', query, tabId });
+}
+
 function sendMessage(message) {
     return new Promise((resolve, reject) => {
         chrome.runtime.sendMessage(message, (response) => {
