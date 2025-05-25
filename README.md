@@ -10,9 +10,10 @@ perform common operations:
 * `getActiveTabInfo()` – returns the id, URL and title of the active tab.
 * `getActiveTabHtml()` – retrieves the full HTML of the active tab.
 * `openNewTab(url)` – opens a new tab with the provided URL.
+* `searchWeb(query, tabId)` – searches the web for the query. If `tabId` is provided the search happens in that tab, otherwise a new tab is opened.
 
-These functions rely on message types `GET_TAB_INFO`, `GET_PAGE_HTML` and
-`OPEN_TAB` handled in `background.js`.
+These functions rely on message types `GET_TAB_INFO`, `GET_PAGE_HTML`,
+`OPEN_TAB` and `SEARCH_WEB` handled in `background.js`.
 
 ## Using tools
 

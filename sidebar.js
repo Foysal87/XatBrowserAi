@@ -90,6 +90,17 @@ class SidebarUI {
                 label: 'Page HTML',
                 action: () => this.sendMessageToBackground({ type: 'GET_PAGE_HTML' })
                     .then(() => this.showNotification('HTML retrieved'))
+            },
+            {
+                icon: '🔍',
+                label: 'Search Web',
+                action: async () => {
+                    const query = prompt('Enter search query');
+                    if (query) {
+                        await this.sendMessageToBackground({ type: 'SEARCH_WEB', query });
+                        this.showNotification('Searching the web');
+                    }
+                }
             }
         ];
         this.tools.forEach(t => {
