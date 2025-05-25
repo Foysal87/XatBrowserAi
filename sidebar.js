@@ -71,6 +71,41 @@ class SidebarUI {
         this.statusText.textContent = 'Select a model to begin';
         this.statusText.style.cssText = 'font-size: 0.9em; color: rgba(255, 255, 255, 0.8);';
 
+        // Create tool panel with quick actions
+        this.toolPanel = document.createElement('div');
+        this.toolPanel.className = 'tool-panel';
+        this.tools = [
+            {
+                icon: '🗂',
+                label: 'Open Tab',
+                action: () => this.sendMessageToBackground({ type: 'OPEN_TAB', url: 'https://example.com' })
+                    .then(() => this.showNotification('Opened new tab'))
+            },
+            {
+                icon: 'ℹ️',
+                label: 'Tab Info',
+                action: async () => {
+                    const info = await this.sendMessageToBackground({ type: 'GET_TAB_INFO' });
+                    if (info && info.title) {
+                        this.showNotification(info.title);
+                    }
+                }
+            },
+            {
+                icon: '📄',
+                label: 'Page HTML',
+                action: () => this.sendMessageToBackground({ type: 'GET_PAGE_HTML' })
+                    .then(() => this.showNotification('HTML retrieved'))
+            }
+        ];
+        this.tools.forEach(t => {
+            const btn = document.createElement('div');
+            btn.className = 'tool-button';
+            btn.innerHTML = `<span class="tool-icon">${t.icon}</span><span class="tool-label">${t.label}</span>`;
+            btn.addEventListener('click', t.action);
+            this.toolPanel.appendChild(btn);
+        });
+
         // Create messages container with modern scrollbar
         this.messages = document.createElement('div');
         this.messages.className = 'messages';
@@ -311,6 +346,32 @@ class SidebarUI {
             .typing-dot:nth-child(1) { animation-delay: 0s; }
             .typing-dot:nth-child(2) { animation-delay: 0.2s; }
             .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+            .tool-panel {
+                display: flex;
+                justify-content: space-around;
+                padding: 10px 20px;
+                background: rgba(42,42,42,0.4);
+                border-bottom: 1px solid var(--glass-border);
+                gap: 10px;
+            }
+            .tool-button {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 4px;
+                font-size: 0.75em;
+                color: #fff;
+                cursor: pointer;
+                padding: 6px 10px;
+                border-radius: 8px;
+                transition: background 0.2s;
+            }
+            .tool-button:hover {
+                background: rgba(255,255,255,0.12);
+            }
+            .tool-icon {
+                font-size: 1.2em;
+            }
             .resize-handle {
                 position: absolute;
                 width: 14px;
@@ -370,6 +431,7 @@ class SidebarUI {
         // Assemble the sidebar structure
         this.sidebar.appendChild(this.dragHandle);
         this.sidebar.appendChild(this.statusIndicator);
+        this.sidebar.appendChild(this.toolPanel);
         this.sidebar.appendChild(this.messages);
         this.sidebar.appendChild(this.inputContainer);
 
