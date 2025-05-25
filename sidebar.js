@@ -488,6 +488,9 @@ class SidebarUI {
                 case 'TOGGLE_SIDEBAR':
                     this.toggleSidebar();
                     break;
+                case 'SHOW_SIDEBAR_ONCE':
+                    this.showSidebarOnce();
+                    break;
                 case 'CHECK_SIDEBAR_STATUS':
                     sendResponse(this.isOpen);
                     break;
@@ -972,6 +975,11 @@ class SidebarUI {
         // Notify background script that sidebar is shown
         chrome.runtime.sendMessage({ type: 'SIDEBAR_SHOWN' });
         chrome.storage.local.set({ sidebarOpen: true });
+    }
+
+    showSidebarOnce() {
+        this.sidebar.style.display = 'flex';
+        this.isOpen = true;
     }
 
     savePosition() {
