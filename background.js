@@ -140,6 +140,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
             return true;
 
+        case 'SEARCH_WEB':
+            const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(request.query || '')}`;
+            if (request.tabId) {
+                chrome.tabs.update(request.tabId, { url: searchUrl }, () => {
+                    sendResponse({ success: true, tabId: request.tabId });
+                });
+            } else {
+                chrome.tabs.create({ url: searchUrl }, (tab) => {
+                    sendResponse({ success: true, tabId: tab.id });
+                });
+            }
+            return true;
+
         case 'EXECUTE_ACTION':
             // Handle action execution requests
             handleActionExecution(request.action, sender.tab.id)
@@ -493,7 +506,7 @@ chrome.runtime.onConnect.addListener((port) => {
             }
 
             // Create system message with tool instructions and current page info
-            let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
+            let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n- searchWeb\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
             
             // Add current page information if available
             if (message.pageUrl && message.pageTitle) {
@@ -667,7 +680,7 @@ async function handleMessage(request, sender, sendResponse) {
         }
 
         // Create a descriptive system message with tool instructions
-        let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
+        let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n- searchWeb\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
         
         // Add current page information if available
         if (pageUrl && pageTitle) {
