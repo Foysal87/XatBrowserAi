@@ -117,6 +117,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
             return true;
 
+        case 'GET_TAB_INFO':
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                const tab = tabs[0];
+                sendResponse({ id: tab.id, url: tab.url, title: tab.title });
+            });
+            return true;
+
+        case 'GET_PAGE_HTML':
+            chrome.scripting
+                .executeScript({
+                    target: { tabId: sender.tab.id },
+                    func: () => document.documentElement.outerHTML
+                })
+                .then((res) => sendResponse({ html: res[0].result }))
+                .catch((err) => sendResponse({ error: err.message }));
+            return true;
+
+        case 'OPEN_TAB':
+            chrome.tabs.create({ url: request.url || 'about:blank' }, (tab) => {
+                sendResponse({ success: true, tabId: tab.id });
+            });
+            return true;
+
         case 'EXECUTE_ACTION':
             // Handle action execution requests
             handleActionExecution(request.action, sender.tab.id)
@@ -469,8 +492,8 @@ chrome.runtime.onConnect.addListener((port) => {
                 return;
             }
 
-            // Create system message with current page and tab information
-            let systemMessage = `You are a helpful AI assistant browsing with the user. Here is information about the current page and other open tabs:\n\n`;
+            // Create system message with tool instructions and current page info
+            let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
             
             // Add current page information if available
             if (message.pageUrl && message.pageTitle) {
@@ -643,8 +666,8 @@ async function handleMessage(request, sender, sendResponse) {
             throw new Error('Selected model not found in configuration');
         }
 
-        // Create a descriptive system message about the tabs and current page
-        let systemMessage = `You are a helpful AI assistant browsing with the user. Here is information about the current page and other open tabs:\n\n`;
+        // Create a descriptive system message with tool instructions
+        let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
         
         // Add current page information if available
         if (pageUrl && pageTitle) {
