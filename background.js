@@ -167,6 +167,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 .catch(error => sendResponse({ error: error.message }));
             return true;
 
+        case 'OPEN_SIDEBAR':
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                const tab = tabs[0];
+                if (!tab || !isInjectableUrl(tab.url)) return;
+
+                chrome.tabs.sendMessage(tab.id, { type: 'SHOW_SIDEBAR_ONCE' }, () => {
+                    if (chrome.runtime.lastError) {
+                        chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['sidebar.js'] }, () => {
+                            chrome.tabs.sendMessage(tab.id, { type: 'SHOW_SIDEBAR_ONCE' });
+                        });
+                    }
+                });
+            });
+            return true;
+
         case 'SIDEBAR_READY':
             // Sidebar is ready, update the icon state if needed
             chrome.action.setIcon({

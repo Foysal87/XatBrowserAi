@@ -118,6 +118,21 @@
             background-color: #4CAF50;
         }
 
+        .sidebar-toggle-button {
+            margin: 8px 0;
+            padding: 6px 12px;
+            background-color: #007AFF;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .sidebar-toggle-button:hover {
+            background-color: #0056b3;
+        }
+
         .mouse-tracker {
             position: fixed;
             pointer-events: none;
@@ -143,6 +158,8 @@
         <div class="status-dot" id="statusDot"></div>
         <span id="statusText">Select a model to begin</span>
     </div>
+
+    <button class="sidebar-toggle-button" id="openSidebarButton">Open Sidebar</button>
 
     <div class="chat-container">
         <div class="messages" id="messages"></div>
