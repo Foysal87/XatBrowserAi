@@ -8,6 +8,7 @@ class ChatUI {
             title: 'Current Chat'
         });
         this.isProcessing = false;
+        this.currentContent = '';
 
         // Initialize UI elements
         this.initializeElements();
@@ -28,6 +29,7 @@ class ChatUI {
     initializeElements() {
         this.modelSelector = document.getElementById('modelSelector');
         this.settingsButton = document.getElementById('settingsButton');
+        this.fullscreenButton = document.getElementById('fullscreenButton');
         this.statusDot = document.getElementById('statusDot');
         this.statusText = document.getElementById('statusText');
         this.messageInput = document.getElementById('messageInput');
@@ -47,6 +49,7 @@ class ChatUI {
     initializeEventListeners() {
         this.modelSelector.addEventListener('change', () => this.handleModelChange());
         this.settingsButton.addEventListener('click', () => this.openSettings());
+        this.fullscreenButton.addEventListener('click', () => this.toggleFullscreen());
         this.messageInput.addEventListener('input', () => {
             const hasText = this.messageInput.value.trim().length > 0;
             const hasModel = this.modelSelector.value !== '';
@@ -74,6 +77,25 @@ class ChatUI {
             const threadItem = e.target.closest('.thread-item');
             if (threadItem) {
                 this.switchThread(threadItem.dataset.threadId);
+            }
+        });
+
+        // Add keyboard shortcut for fullscreen (F11)
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'F11') {
+                e.preventDefault();
+                this.toggleFullscreen();
+            }
+        });
+
+        // Listen for fullscreen changes (e.g., when user presses Escape)
+        document.addEventListener('fullscreenchange', () => {
+            if (document.fullscreenElement) {
+                this.fullscreenButton.textContent = '🗗';
+                this.fullscreenButton.title = 'Exit Fullscreen';
+            } else {
+                this.fullscreenButton.textContent = '🖥️';
+                this.fullscreenButton.title = 'Enter Fullscreen';
             }
         });
     }
@@ -303,17 +325,19 @@ class ChatUI {
 
     handleModelChange() {
         const selectedModel = this.modelSelector.value;
-        this.statusDot.style.backgroundColor = selectedModel ? '#4CAF50' : '#ccc';
+        this.statusDot.className = selectedModel ? 'status-dot active' : 'status-dot';
         this.statusText.textContent = selectedModel ? 
             `Model selected: ${selectedModel}` : 
             'Select a model to begin';
-        this.sendButton.disabled = !selectedModel;
+        
+        // Update send button state
+        this.handleInputChange();
     }
 
     handleInputChange() {
-        this.messageInput.style.height = 'auto';
-        this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 120) + 'px';
-        this.sendButton.disabled = !this.messageInput.value.trim() || !this.modelSelector.value;
+        const hasText = this.messageInput.value.trim().length > 0;
+        const hasModel = this.modelSelector.value !== '';
+        this.sendButton.disabled = !hasText || !hasModel || this.isProcessing;
     }
 
     handleKeyPress(e) {
@@ -349,6 +373,9 @@ class ChatUI {
                 threadId: this.currentThread
             });
 
+            // Update status to processing
+            this.updateStatus('processing', 'Processing your request...');
+
             // Clear input first
             this.messageInput.value = '';
             this.handleInputChange();
@@ -369,8 +396,9 @@ class ChatUI {
 
             // Create a dedicated port for this conversation
             port = chrome.runtime.connect({ name: 'chat' });
+            let isFirstChunk = true;
             
-            // Set up port message listener
+            // Set up port message listener with enhanced tool execution handling
             port.onMessage.addListener((response) => {
                 this.log(this.logLevels.INFO, 'Received port message', { 
                     type: response.type,
@@ -380,14 +408,34 @@ class ChatUI {
                 });
                 
                 if (response.error) {
+                    this.hideTypingIndicator();
                     this.removeStreamingIndicator();
                     throw new Error(response.error);
                 }
                 
-                if (response.type === 'delta') {
-                    this.handleStreamingContent(response.content);
+                if (response.type === 'delta' && response.content) {
+                    // Handle streaming content
+                    const content = response.content;
+                    
+                    if (content && content.trim()) {
+                        if (isFirstChunk) {
+                            this.hideTypingIndicator();
+                            isFirstChunk = false;
+                        }
+                        
+                        this.handleStreamingContent(content);
+                    }
+                } else if (response.type === 'tool_execution_inline') {
+                    // Handle inline tool execution like Cursor
+                    if (!this.currentMessage) {
+                        this.currentMessage = this.addMessageToUI('assistant', '');
+                        isFirstChunk = false;
+                    }
+                    this.handleInlineToolExecution(response, this.currentMessage);
                 } else if (response.done) {
+                    this.hideTypingIndicator();
                     this.removeStreamingIndicator();
+                    this.updateStatus('active', 'Ready');
                     this.log(this.logLevels.INFO, 'Stream complete', { 
                         contentLength: this.currentContent.length
                     });
@@ -411,6 +459,11 @@ class ChatUI {
                 }
             });
 
+            // Get page content for context
+            const pageContent = this.preprocessHtml();
+            const pageUrl = window.location.href;
+            const pageTitle = document.title;
+
             // Send the message through the port
             this.log(this.logLevels.INFO, 'Sending message through port', {
                 modelId: this.modelSelector.value,
@@ -421,7 +474,10 @@ class ChatUI {
                 type: 'PROCESS_MESSAGE',
                 message: message,
                 threadId: this.currentThread,
-                modelId: this.modelSelector.value
+                modelId: this.modelSelector.value,
+                pageContent: pageContent,
+                pageUrl: pageUrl,
+                pageTitle: pageTitle
             });
 
         } catch (error) {
@@ -451,6 +507,9 @@ class ChatUI {
             }
             this.addMessageToThread('assistant', `Error: ${errorMessage}`, true);
             
+            // Update status to error
+            this.updateStatus('error', 'Error occurred');
+            
             // Show notification
             this.showNotification(`Error: ${errorMessage}`);
             
@@ -474,6 +533,12 @@ class ChatUI {
             this.setUIState(true);
             this.hideTypingIndicator();
             this.isProcessing = false;
+            
+            // Restore status if not in error state
+            if (!this.statusDot.classList.contains('error')) {
+                this.updateStatus('active', 'Ready');
+            }
+            
             this.log(this.logLevels.INFO, 'Message processing completed');
         }
     }
@@ -523,9 +588,326 @@ class ChatUI {
             this.currentMessage.appendChild(indicator);
         }
         
+        // Append content and reformat the entire message
         this.currentContent += content;
-        contentDiv.textContent = this.currentContent;
+        
+        // Apply markdown formatting to the complete text
+        let formattedText = this.currentContent;
+        
+        // Convert **bold** to HTML
+        formattedText = formattedText.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        
+        // Convert ### headers to HTML
+        formattedText = formattedText.replace(/^### (.*$)/gm, '<h3 style="margin: 16px 0 8px 0; color: #e0e0e0; font-size: 1.1em; font-weight: 600;">$1</h3>');
+        
+        // Convert bullet points to HTML
+        formattedText = formattedText.replace(/^- (.*$)/gm, '<div style="margin: 4px 0; padding-left: 16px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF;">•</span>$1</div>');
+        
+        // Convert numbered lists to HTML
+        formattedText = formattedText.replace(/^(\d+)\. (.*$)/gm, '<div style="margin: 4px 0; padding-left: 20px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF; font-weight: 600;">$1.</span>$2</div>');
+        
+        // Convert URLs to clickable links
+        formattedText = formattedText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" style="color: #007AFF; text-decoration: none; border-bottom: 1px solid rgba(0, 122, 255, 0.3);">$1</a>');
+        
+        // Preserve line breaks
+        formattedText = formattedText.replace(/\n/g, '<br>');
+        
+        contentDiv.innerHTML = formattedText;
         this.scrollToBottom();
+    }
+
+    handleInlineToolExecution(response, currentAssistantMessage) {
+        // Handle inline tool execution like Cursor
+        if (!currentAssistantMessage) {
+            // Create assistant message if it doesn't exist
+            currentAssistantMessage = this.addMessageToUI('assistant', '');
+        }
+        
+        const contentDiv = currentAssistantMessage.querySelector('.message-content');
+        if (!contentDiv) return;
+        
+        // Create or update tool execution indicator
+        let toolIndicator = currentAssistantMessage.querySelector('.tool-execution-indicator');
+        
+        if (response.status === 'executing') {
+            // Add tool execution indicator inline
+            if (!toolIndicator) {
+                toolIndicator = document.createElement('div');
+                toolIndicator.className = 'tool-execution-indicator';
+                toolIndicator.style.cssText = `
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 12px 16px;
+                    margin: 8px 0;
+                    background: linear-gradient(135deg, rgba(0, 122, 255, 0.08), rgba(0, 122, 255, 0.12));
+                    border: 1px solid rgba(0, 122, 255, 0.2);
+                    border-radius: 12px;
+                    font-size: 0.9em;
+                    color: rgba(224, 224, 224, 0.9);
+                    animation: fadeIn 0.3s ease;
+                    backdrop-filter: blur(10px);
+                    position: relative;
+                    overflow: hidden;
+                `;
+                
+                // Add subtle animated background
+                const bgAnimation = document.createElement('div');
+                bgAnimation.style.cssText = `
+                    position: absolute;
+                    top: 0;
+                    left: -100%;
+                    width: 100%;
+                    height: 100%;
+                    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+                    animation: shimmer 2s infinite;
+                `;
+                toolIndicator.appendChild(bgAnimation);
+                
+                const spinner = document.createElement('div');
+                spinner.className = 'tool-spinner';
+                spinner.style.cssText = `
+                    width: 16px;
+                    height: 16px;
+                    border: 2px solid rgba(0, 122, 255, 0.3);
+                    border-top: 2px solid #007AFF;
+                    border-radius: 50%;
+                    animation: spin 1s linear infinite;
+                    flex-shrink: 0;
+                `;
+                
+                const text = document.createElement('span');
+                text.style.cssText = `
+                    font-weight: 500;
+                    z-index: 1;
+                    position: relative;
+                `;
+                text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'executing');
+                
+                toolIndicator.appendChild(spinner);
+                toolIndicator.appendChild(text);
+                currentAssistantMessage.appendChild(toolIndicator);
+                
+                // Add shimmer animation to styles if not already added
+                if (!document.querySelector('#shimmerStyle')) {
+                    const shimmerStyle = document.createElement('style');
+                    shimmerStyle.id = 'shimmerStyle';
+                    shimmerStyle.textContent = `
+                        @keyframes shimmer {
+                            0% { left: -100%; }
+                            100% { left: 100%; }
+                        }
+                        @keyframes spin {
+                            0% { transform: rotate(0deg); }
+                            100% { transform: rotate(360deg); }
+                        }
+                        @keyframes fadeIn {
+                            from { opacity: 0; transform: translateY(-5px); }
+                            to { opacity: 1; transform: translateY(0); }
+                        }
+                    `;
+                    document.head.appendChild(shimmerStyle);
+                }
+            }
+        } else if (response.status === 'completed') {
+            // Update indicator to show completion
+            if (toolIndicator) {
+                toolIndicator.style.background = 'linear-gradient(135deg, rgba(52, 199, 89, 0.08), rgba(52, 199, 89, 0.12))';
+                toolIndicator.style.borderColor = 'rgba(52, 199, 89, 0.3)';
+                
+                const spinner = toolIndicator.querySelector('.tool-spinner');
+                if (spinner) {
+                    spinner.style.display = 'none';
+                }
+                
+                const checkmark = document.createElement('div');
+                checkmark.innerHTML = '✓';
+                checkmark.style.cssText = `
+                    color: #34C759;
+                    font-weight: bold;
+                    font-size: 16px;
+                    width: 16px;
+                    height: 16px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    flex-shrink: 0;
+                    z-index: 1;
+                    position: relative;
+                `;
+                
+                if (spinner) {
+                    toolIndicator.replaceChild(checkmark, spinner);
+                }
+                
+                const text = toolIndicator.querySelector('span');
+                if (text) {
+                    text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'completed');
+                }
+                
+                // Remove shimmer animation
+                const bgAnimation = toolIndicator.querySelector('div');
+                if (bgAnimation && bgAnimation.style.animation.includes('shimmer')) {
+                    bgAnimation.remove();
+                }
+                
+                // Auto-hide after 3 seconds with smooth fade
+                setTimeout(() => {
+                    if (toolIndicator && toolIndicator.parentNode) {
+                        toolIndicator.style.transition = 'all 0.5s ease';
+                        toolIndicator.style.opacity = '0';
+                        toolIndicator.style.transform = 'translateY(-10px)';
+                        setTimeout(() => {
+                            if (toolIndicator && toolIndicator.parentNode) {
+                                toolIndicator.remove();
+                            }
+                        }, 500);
+                    }
+                }, 3000);
+            }
+        } else if (response.status === 'error') {
+            // Update indicator to show error
+            if (toolIndicator) {
+                toolIndicator.style.background = 'linear-gradient(135deg, rgba(255, 59, 48, 0.08), rgba(255, 59, 48, 0.12))';
+                toolIndicator.style.borderColor = 'rgba(255, 59, 48, 0.3)';
+                
+                const spinner = toolIndicator.querySelector('.tool-spinner');
+                if (spinner) {
+                    spinner.style.display = 'none';
+                }
+                
+                const errorIcon = document.createElement('div');
+                errorIcon.innerHTML = '⚠';
+                errorIcon.style.cssText = `
+                    color: #FF3B30;
+                    font-weight: bold;
+                    font-size: 16px;
+                    width: 16px;
+                    height: 16px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    flex-shrink: 0;
+                    z-index: 1;
+                    position: relative;
+                `;
+                
+                if (spinner) {
+                    toolIndicator.replaceChild(errorIcon, spinner);
+                }
+                
+                const text = toolIndicator.querySelector('span');
+                if (text) {
+                    text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'error', response.error);
+                }
+                
+                // Remove shimmer animation
+                const bgAnimation = toolIndicator.querySelector('div');
+                if (bgAnimation && bgAnimation.style.animation.includes('shimmer')) {
+                    bgAnimation.remove();
+                }
+            }
+        }
+        
+        this.scrollToBottom();
+    }
+
+    getToolDisplayMessage(tool, args, status, error = null) {
+        const toolMessages = {
+            'searchWeb': {
+                executing: `🔍 Searching for "${args.query}"...`,
+                completed: `✅ Found search results for "${args.query}"`,
+                error: `❌ Search failed: ${error || 'Unknown error'}`
+            },
+            'getPageContent': {
+                executing: `📄 Extracting content from search results...`,
+                completed: `✅ Content extracted successfully`,
+                error: `❌ Content extraction failed: ${error || 'Unknown error'}`
+            },
+            'openNewTab': {
+                executing: `🌐 Opening new tab...`,
+                completed: `✅ New tab opened`,
+                error: `❌ Failed to open tab: ${error || 'Unknown error'}`
+            },
+            'generateTool': {
+                executing: `🔧 Generating specialized tool...`,
+                completed: `✅ Tool generated successfully`,
+                error: `❌ Tool generation failed: ${error || 'Unknown error'}`
+            }
+        };
+        
+        return toolMessages[tool]?.[status] || `${status} ${tool}`;
+    }
+
+    preprocessHtml() {
+        // Create a temporary div to work with the HTML
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = document.documentElement.innerHTML;
+
+        // Remove unnecessary elements
+        const elementsToRemove = [
+            'script', 'style', 'noscript', 'iframe', 'svg', 'canvas',
+            'link', 'meta', 'head', 'footer', 'nav', 'aside',
+            '[style*="display: none"]', '[style*="visibility: hidden"]',
+            '[aria-hidden="true"]', '[role="presentation"]'
+        ];
+
+        elementsToRemove.forEach(selector => {
+            const elements = tempDiv.querySelectorAll(selector);
+            elements.forEach(el => el.remove());
+        });
+
+        // Remove empty elements and comments
+        const removeEmptyElements = (element) => {
+            const children = Array.from(element.children);
+            children.forEach(child => {
+                // Remove empty elements (no text content and no non-empty children)
+                if (!child.textContent.trim() && !child.querySelector('img, video, input, button')) {
+                    child.remove();
+                } else {
+                    removeEmptyElements(child);
+                }
+            });
+        };
+
+        removeEmptyElements(tempDiv);
+
+        // Remove inline styles and classes
+        const removeAttributes = (element) => {
+            const children = Array.from(element.children);
+            children.forEach(child => {
+                child.removeAttribute('style');
+                child.removeAttribute('class');
+                child.removeAttribute('id');
+                removeAttributes(child);
+            });
+        };
+
+        removeAttributes(tempDiv);
+
+        // Get only the main content
+        let mainContent = '';
+        const mainSelectors = ['main', 'article', '[role="main"]', '#content', '.content', '#main', '.main'];
+        
+        for (const selector of mainSelectors) {
+            const element = tempDiv.querySelector(selector);
+            if (element) {
+                mainContent = element.textContent.trim();
+                break;
+            }
+        }
+
+        // If no main content found, get body content
+        if (!mainContent) {
+            mainContent = tempDiv.textContent.trim();
+        }
+
+        // Clean up the text content
+        return mainContent
+            .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
+            .replace(/\n+/g, '\n') // Replace multiple newlines with single newline
+            .trim()
+            .substring(0, 50000);  // Limit content length
     }
 
     // Add this method to remove streaming indicator when done
@@ -545,13 +927,42 @@ class ChatUI {
         // Create message content container
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
-        contentDiv.textContent = content;
+        
+        // Handle different types of content with markdown formatting
+        if (typeof content === 'object') {
+            contentDiv.textContent = JSON.stringify(content, null, 2);
+        } else {
+            // Basic markdown-like formatting for better readability
+            let formattedText = content;
+            
+            // Convert **bold** to HTML
+            formattedText = formattedText.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            
+            // Convert ### headers to HTML
+            formattedText = formattedText.replace(/^### (.*$)/gm, '<h3 style="margin: 16px 0 8px 0; color: #e0e0e0; font-size: 1.1em; font-weight: 600;">$1</h3>');
+            
+            // Convert bullet points to HTML
+            formattedText = formattedText.replace(/^- (.*$)/gm, '<div style="margin: 4px 0; padding-left: 16px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF;">•</span>$1</div>');
+            
+            // Convert numbered lists to HTML
+            formattedText = formattedText.replace(/^(\d+)\. (.*$)/gm, '<div style="margin: 4px 0; padding-left: 20px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF; font-weight: 600;">$1.</span>$2</div>');
+            
+            // Convert URLs to clickable links
+            formattedText = formattedText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" style="color: #007AFF; text-decoration: none; border-bottom: 1px solid rgba(0, 122, 255, 0.3);">$1</a>');
+            
+            // Preserve line breaks
+            formattedText = formattedText.replace(/\n/g, '<br>');
+            
+            contentDiv.innerHTML = formattedText;
+        }
+        
         messageDiv.appendChild(contentDiv);
         
         // Add timestamp
         const timestamp = document.createElement('div');
         timestamp.className = 'message-timestamp';
         timestamp.textContent = new Date().toLocaleTimeString();
+        timestamp.style.cssText = 'font-size: 0.75em; opacity: 0.6; margin-top: 8px; text-align: right;';
         messageDiv.appendChild(timestamp);
         
         this.messagesContainer.appendChild(messageDiv);
@@ -713,6 +1124,42 @@ class ChatUI {
             this.messagesContainer.insertBefore(privacyDiv, this.messagesContainer.firstChild);
         } else {
             this.messagesContainer.appendChild(privacyDiv);
+        }
+    }
+
+    updateStatus(type, text) {
+        this.statusDot.className = `status-dot ${type}`;
+        this.statusText.textContent = text;
+    }
+
+    toggleFullscreen() {
+        try {
+            if (document.fullscreenElement) {
+                // Exit fullscreen
+                document.exitFullscreen().then(() => {
+                    this.fullscreenButton.textContent = '🖥️';
+                    this.fullscreenButton.title = 'Enter Fullscreen';
+                    this.log(this.logLevels.INFO, 'Exited fullscreen mode');
+                }).catch((error) => {
+                    console.error('Error exiting fullscreen:', error);
+                    this.log(this.logLevels.ERROR, 'Failed to exit fullscreen', error);
+                });
+            } else {
+                // Enter fullscreen
+                document.documentElement.requestFullscreen().then(() => {
+                    this.fullscreenButton.textContent = '🗗';
+                    this.fullscreenButton.title = 'Exit Fullscreen';
+                    this.log(this.logLevels.INFO, 'Entered fullscreen mode');
+                }).catch((error) => {
+                    console.error('Error entering fullscreen:', error);
+                    this.log(this.logLevels.ERROR, 'Failed to enter fullscreen', error);
+                    this.showNotification('Fullscreen not supported or blocked');
+                });
+            }
+        } catch (error) {
+            console.error('Fullscreen API error:', error);
+            this.log(this.logLevels.ERROR, 'Fullscreen API not supported', error);
+            this.showNotification('Fullscreen not supported in this browser');
         }
     }
 }

@@ -133,7 +133,12 @@ class PopupUI {
     }
 
     openSidebar() {
-        chrome.runtime.sendMessage({ type: 'OPEN_SIDEBAR' });
+        // Send message to background to open enhanced sidebar
+        chrome.runtime.sendMessage({ type: 'OPEN_SIDEBAR' }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error('Error opening sidebar:', chrome.runtime.lastError);
+            }
+        });
     }
 
     animateMouseMovements(movements) {

@@ -9,7 +9,8 @@
     "scripting",
     "notifications",
     "activeTab",
-    "webNavigation"
+    "webNavigation",
+    "contextMenus"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -39,6 +40,9 @@
         "configManager.js",
         "aiClients.js",
         "browserTools.js",
+        "orchestrator.js",
+        "sidebar-enhanced.js",
+        "sidebar.js",
         "config/*",
         "settings.html",
         "settings.js"

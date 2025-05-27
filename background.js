@@ -8,6 +8,20 @@ chrome.runtime.onInstalled.addListener((details) => {
             url: 'welcome.html'
         });
     }
+    
+    // Create context menu item for opening sidebar
+    chrome.contextMenus.create({
+        id: 'openSidebar',
+        title: 'Open XatBrowser AI Sidebar',
+        contexts: ['action']  // This makes it appear in the extension's dropdown menu
+    });
+
+    // Create context menu item for opening full chat interface
+    chrome.contextMenus.create({
+        id: 'openFullChat',
+        title: 'Open XatBrowser AI Full Interface',
+        contexts: ['action']
+    });
 });
 
 // Check if a URL is injectable
@@ -28,16 +42,187 @@ function isInjectableUrl(url) {
 
 // Handle extension icon click
 chrome.action.onClicked.addListener((tab) => {
-    // Open chat in a new tab
-    chrome.tabs.create({ url: 'chat.html' });
+    if (tab && isInjectableUrl(tab.url)) {
+        const domain = new URL(tab.url).hostname;
+        
+        chrome.tabs.sendMessage(tab.id, { type: 'SHOW_SIDEBAR_ONCE' }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.log('No existing enhanced sidebar, injecting new one...');
+                injectEnhancedSidebar(tab.id, domain);
+            } else {
+                console.log('Enhanced sidebar shown successfully');
+            }
+        });
+    } else {
+        // Open chat.html in a new window with full screen dimensions
+        chrome.windows.create({
+            url: 'chat.html',
+            type: 'normal',
+            state: 'maximized',
+            focused: true
+        });
+    }
 });
+
+// Handle context menu clicks
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId === 'openSidebar') {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const currentTab = tabs[0];
+            if (!currentTab || !isInjectableUrl(currentTab.url)) {
+                console.log('Cannot inject sidebar into this tab:', currentTab?.url);
+                return;
+            }
+
+            console.log('Opening sidebar for domain:', currentTab.url);
+
+            const domain = new URL(currentTab.url).hostname;
+
+            // Check if enhanced sidebar is already loaded
+            chrome.scripting.executeScript({
+                target: { tabId: currentTab.id },
+                func: () => window.xatBrowserEnhancedSidebarLoaded && window.xatBrowserEnhancedSidebar
+            }).then((result) => {
+                if (result && result[0] && result[0].result) {
+                    console.log('Enhanced sidebar already exists, showing it...');
+                    chrome.scripting.executeScript({
+                        target: { tabId: currentTab.id },
+                        func: (domain) => {
+                            if (window.xatBrowserEnhancedSidebar) {
+                                window.xatBrowserEnhancedSidebar.showSidebarForDomain(domain);
+                                return true;
+                            }
+                            return false;
+                        },
+                        args: [domain]
+                    });
+                } else {
+                    console.log('No enhanced sidebar found, injecting new one...');
+                    injectEnhancedSidebar(currentTab.id, domain);
+                }
+            }).catch((error) => {
+                console.log('Error checking sidebar status, injecting new one...', error);
+                injectEnhancedSidebar(currentTab.id, domain);
+            });
+        });
+    } else if (info.menuItemId === 'openFullChat') {
+        // Open full chat interface in maximized window
+        chrome.windows.create({
+            url: 'chat.html',
+            type: 'normal',
+            state: 'maximized',
+            focused: true
+        });
+    }
+});
+
+// Helper function to inject enhanced sidebar
+function injectEnhancedSidebar(tabId, domain) {
+    // Check if tab is still valid
+    chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError) {
+            console.error('Tab no longer exists:', chrome.runtime.lastError.message);
+            return;
+        }
+
+        // Inject orchestrator first, then enhanced sidebar
+        chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            files: ['orchestrator.js']
+        }).then(() => {
+            return chrome.scripting.executeScript({
+                target: { tabId: tabId },
+                files: ['sidebar-enhanced.js']
+            });
+        }).then(() => {
+            console.log('Enhanced sidebar scripts injected successfully');
+            setTimeout(() => {
+                if (domain) {
+                    chrome.scripting.executeScript({
+                        target: { tabId: tabId },
+                        func: (domain) => {
+                            if (window.xatBrowserEnhancedSidebar) {
+                                window.xatBrowserEnhancedSidebar.showSidebarForDomain(domain);
+                            }
+                        },
+                        args: [domain]
+                    }).catch((error) => {
+                        console.error('Failed to show sidebar for domain:', error.message);
+                    });
+                } else {
+                    chrome.tabs.sendMessage(tabId, { type: 'SHOW_SIDEBAR_ONCE' }, (response) => {
+                        if (chrome.runtime.lastError) {
+                            console.error('Failed to show enhanced sidebar:', chrome.runtime.lastError.message);
+                        } else {
+                            console.log('Enhanced sidebar shown successfully');
+                        }
+                    });
+                }
+            }, 500);
+        }).catch((error) => {
+            console.error('Failed to inject enhanced sidebar scripts:', error.message);
+            
+            // Try fallback to regular sidebar if enhanced fails
+            if (error.message.includes('context invalidated') || error.message.includes('tab was discarded')) {
+                console.log('Attempting fallback to regular sidebar...');
+                chrome.scripting.executeScript({
+                    target: { tabId: tabId },
+                    files: ['sidebar.js']
+                }).catch((fallbackError) => {
+                    console.error('Fallback sidebar injection also failed:', fallbackError.message);
+                });
+            }
+        });
+    });
+}
 
 // Thread management
 let activeThreads = new Map();
 
-// Message handling
+// Add dynamic tool registry
+const dynamicTools = new Map();
+
+// Handle dynamic tool registration
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    console.log('Background received message:', request); // Debug log
+    if (request.type === 'REGISTER_DYNAMIC_TOOL') {
+        try {
+            const { name, implementation } = request.tool;
+            // Create a safe sandbox for the tool
+            const toolFunction = new Function('args', `
+                with (args) {
+                    ${implementation}
+                }
+            `);
+            
+            dynamicTools.set(name, async (args) => {
+                try {
+                    return await toolFunction(args);
+                } catch (error) {
+                    console.error(`Error executing dynamic tool ${name}:`, error);
+                    throw error;
+                }
+            });
+            
+            sendResponse({ success: true });
+        } catch (error) {
+            console.error('Error registering dynamic tool:', error);
+            sendResponse({ error: error.message });
+        }
+        return true;
+    }
+
+    if (request.type === 'EXECUTE_DYNAMIC_TOOL') {
+        const { name, args } = request;
+        if (!dynamicTools.has(name)) {
+            sendResponse({ error: `Dynamic tool ${name} not found` });
+            return true;
+        }
+
+        dynamicTools.get(name)(args)
+            .then(result => sendResponse({ success: true, result }))
+            .catch(error => sendResponse({ error: error.message }));
+        return true;
+    }
 
     if (request.type === 'sendMessage') {
         handleMessage(request, sender, sendResponse);
@@ -172,11 +357,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 const tab = tabs[0];
                 if (!tab || !isInjectableUrl(tab.url)) return;
 
+                const domain = new URL(tab.url).hostname;
                 chrome.tabs.sendMessage(tab.id, { type: 'SHOW_SIDEBAR_ONCE' }, () => {
                     if (chrome.runtime.lastError) {
-                        chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['sidebar.js'] }, () => {
-                            chrome.tabs.sendMessage(tab.id, { type: 'SHOW_SIDEBAR_ONCE' });
-                        });
+                        injectEnhancedSidebar(tab.id, domain);
                     }
                 });
             });
@@ -196,16 +380,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// Handle tab updates
+// Handle tab updates - Don't auto-inject sidebar anymore
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    // Sidebar is now only shown when user explicitly requests it via context menu or extension icon
+    // This prevents unwanted sidebar appearances and respects user's domain-specific preferences
     if (changeInfo.status === 'complete' && isInjectableUrl(tab.url)) {
-        // Inject the sidebar script when the page is fully loaded
-        chrome.scripting.executeScript({
-            target: { tabId },
-            files: ['sidebar.js']
-        }).catch(error => {
-            console.error('Error injecting sidebar script:', error);
-        });
+        console.log('Page loaded, sidebar will only appear when user requests it');
     }
 });
 
@@ -474,7 +654,44 @@ chrome.runtime.onConnect.addListener((port) => {
     
     if (port.name !== 'chat') return;
 
+    let isConnected = true;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 3;
+
+    port.onDisconnect.addListener(() => {
+        console.log('Port disconnected');
+        isConnected = false;
+        
+        if (chrome.runtime.lastError) {
+            console.error('Port disconnected with error:', chrome.runtime.lastError);
+            
+            if (chrome.runtime.lastError.message.includes('Extension context invalidated')) {
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    console.log(`Attempting to reconnect (${reconnectAttempts}/${maxReconnectAttempts})...`);
+                    setTimeout(() => {
+                        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                            if (tabs[0]) {
+                                chrome.scripting.executeScript({
+                                    target: { tabId: tabs[0].id },
+                                    files: ['orchestrator.js', 'sidebar-enhanced.js']
+                                }).catch(error => {
+                                    console.error('Error re-injecting scripts:', error);
+                                });
+                            }
+                        });
+                    }, 1000 * reconnectAttempts);
+                }
+            }
+        }
+    });
+
     port.onMessage.addListener(async (message) => {
+        if (!isConnected) {
+            port.postMessage({ error: 'Connection lost. Please refresh the page.' });
+            return;
+        }
+
         console.log('Port received message:', message);
         
         if (message.type !== 'PROCESS_MESSAGE') {
@@ -488,12 +705,12 @@ chrome.runtime.onConnect.addListener((port) => {
             let modelConfig = null;
             let client = null;
 
-            // Get basic tab information without accessing content
+            // Get basic tab information
             console.log('Getting basic tab info...');
             const visibleTabs = await getVisibleTabsInfo();
             console.log('Got basic tab info for', visibleTabs.length, 'tabs');
             
-            // Create context from visible tabs in markdown format
+            // Create context from visible tabs
             const context = formatTabContext(visibleTabs);
             console.log('Formatted basic tab context');
 
@@ -520,22 +737,21 @@ chrome.runtime.onConnect.addListener((port) => {
                 return;
             }
 
-            // Create system message with tool instructions and current page info
-            let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n- searchWeb\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
+            // Create enhanced system message with orchestrator capabilities
+            const systemMessage = getSystemMessage(context);
             
             // Add current page information if available
+            let enhancedSystemMessage = systemMessage;
             if (message.pageUrl && message.pageTitle) {
-                systemMessage += `## Current Page
+                enhancedSystemMessage += `\n\nCURRENT PAGE CONTEXT:
 **Title:** ${message.pageTitle}
 **URL:** ${message.pageUrl}
-${message.pageHtml ? `\n### Page Content\n\`\`\`html\n${message.pageHtml}\n\`\`\`` : ''}\n\n`;
-            }
-            
-            // Add other tabs information
-            systemMessage += `## Other Open Tabs\n${context}\n\n`;
-            systemMessage += `Provide assistance based on this information. If the user asks about specific content within other pages (not the current page), kindly explain that you don't have access to the full content of those pages for privacy reasons.`;
+**Content Preview:** ${message.pageContent ? message.pageContent.substring(0, 1000) + '...' : 'No content available'}
 
-            // Stream processing functions
+Use this context when relevant to the user's request.`;
+            }
+
+            // Enhanced streaming callback with tool execution detection
             const processStreamChunk = (chunk) => {
                 try {
                     console.log('Processing stream chunk for port:', chunk ? typeof chunk : 'null');
@@ -565,13 +781,102 @@ ${message.pageHtml ? `\n### Page Content\n\`\`\`html\n${message.pageHtml}\n\`\`\
                     }
                     
                     if (content && content.length > 0) {
-                        console.log('Sending content chunk to port:', content.length, 'chars');
-                        // Send the content via the port directly
-                        port.postMessage({
-                            type: 'delta',
-                            content: content,
-                            role: 'assistant'
-                        });
+                        console.log('Processing content chunk:', content);
+                        
+                        // Detect and extract tool execution patterns
+                        const toolPatterns = [
+                            /\{"tool":\s*"([^"]+)",\s*"args":\s*\{[^}]*\}\}/g,
+                            /\{\s*"tool"\s*:\s*"([^"]+)"\s*,\s*"args"\s*:\s*\{[^}]*\}\s*\}/g,
+                            /\{"tool":"([^"]+)","args":\{[^}]*\}\}/g
+                        ];
+                        
+                        let toolMatches = null;
+                        let usedPattern = null;
+                        
+                        for (const pattern of toolPatterns) {
+                            const matches = content.match(pattern);
+                            if (matches && matches.length > 0) {
+                                toolMatches = matches;
+                                usedPattern = pattern;
+                                break;
+                            }
+                        }
+                        
+                        // Check for tool intention patterns if no JSON found
+                        if (!toolMatches) {
+                            const intentionPatterns = [
+                                { pattern: /I'll search for|I will search for|Let me search for|Searching for/i, tool: 'searchWeb' },
+                                { pattern: /I'll get the page content|I will get the page content|Let me get the page content/i, tool: 'getPageContent' },
+                                { pattern: /I'll open a new tab|I will open a new tab|Let me open a new tab/i, tool: 'openNewTab' }
+                            ];
+                            
+                            for (const { pattern, tool } of intentionPatterns) {
+                                if (pattern.test(content)) {
+                                    console.log('Detected tool intention without proper JSON format');
+                                    if (tool === 'searchWeb' && message.message) {
+                                        const fallbackToolCall = {
+                                            tool: 'searchWeb',
+                                            args: { query: message.message }
+                                        };
+                                        toolMatches = [JSON.stringify(fallbackToolCall)];
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Process tool executions if found
+                        if (toolMatches) {
+                            console.log('Processing tool executions:', toolMatches);
+                            processToolExecutions(toolMatches, port, client, enhancedSystemMessage, message);
+                            
+                            // Filter out tool JSON and intention phrases from user-visible content
+                            let filteredContent = content;
+                            
+                            // Remove JSON tool calls
+                            if (usedPattern) {
+                                filteredContent = filteredContent.replace(usedPattern, '').trim();
+                            }
+                            
+                            // Remove tool intention phrases
+                            const intentionPhrases = [
+                                /I'll search for[^.]*\.\s*/gi,
+                                /Let me search for[^.]*\.\s*/gi,
+                                /I will search for[^.]*\.\s*/gi,
+                                /Searching for[^.]*\.\s*/gi,
+                                /I'll get the page content[^.]*\.\s*/gi,
+                                /Let me get the page content[^.]*\.\s*/gi,
+                                /I will get the page content[^.]*\.\s*/gi,
+                                /I'll open a new tab[^.]*\.\s*/gi,
+                                /Let me open a new tab[^.]*\.\s*/gi,
+                                /I will open a new tab[^.]*\.\s*/gi
+                            ];
+                            
+                            intentionPhrases.forEach(phrase => {
+                                filteredContent = filteredContent.replace(phrase, '');
+                            });
+                            
+                            // Clean up extra whitespace
+                            filteredContent = filteredContent.replace(/\s+/g, ' ').trim();
+                            
+                            // Only send content if there's meaningful text left
+                            if (filteredContent && filteredContent.length > 10) {
+                                console.log('Sending filtered content chunk to port:', filteredContent.length, 'chars');
+                                port.postMessage({
+                                    type: 'delta',
+                                    content: filteredContent,
+                                    role: 'assistant'
+                                });
+                            }
+                        } else {
+                            // No tool execution detected, send content as-is
+                            console.log('Sending content chunk to port:', content.length, 'chars');
+                            port.postMessage({
+                                type: 'delta',
+                                content: content,
+                                role: 'assistant'
+                            });
+                        }
                     }
                 } catch (error) {
                     console.error('Error processing stream chunk:', error);
@@ -579,69 +884,780 @@ ${message.pageHtml ? `\n### Page Content\n\`\`\`html\n${message.pageHtml}\n\`\`\
                 }
             };
             
-            // Process message with streaming
-            if (message.message && message.message.trim()) {
-                try {
-                    // Store thread information for later
-                    const threadId = message.threadId || 'default';
-                    if (!activeThreads.has(threadId)) {
-                        activeThreads.set(threadId, {
-                            messages: [],
-                            lastActive: Date.now()
+            // New function to handle tool execution chain
+            async function processToolExecutions(toolMatches, port, client, systemMessage, originalMessage) {
+                console.log('Processing tool executions:', toolMatches.length, 'tools found');
+                const toolResults = [];
+                
+                for (const match of toolMatches) {
+                    try {
+                        const toolCall = JSON.parse(match);
+                        console.log('Executing tool:', toolCall.tool, 'with args:', toolCall.args);
+                        
+                        // Notify UI of tool execution start (inline with response)
+                        port.postMessage({
+                            type: 'tool_execution_inline',
+                            tool: toolCall.tool,
+                            args: toolCall.args,
+                            status: 'executing',
+                            message: getToolExecutionMessage(toolCall.tool, 'executing')
+                        });
+                        
+                        // Execute the tool
+                        const toolResult = await executeToolCall(toolCall);
+                        console.log('Tool execution completed:', toolCall.tool, 'success:', toolResult.success);
+                        
+                        // Notify UI of tool completion
+                        port.postMessage({
+                            type: 'tool_execution_inline',
+                            tool: toolCall.tool,
+                            args: toolCall.args,
+                            result: toolResult,
+                            status: 'completed',
+                            message: getToolExecutionMessage(toolCall.tool, 'completed')
+                        });
+                        
+                        toolResults.push({
+                            tool: toolCall.tool,
+                            args: toolCall.args,
+                            result: toolResult
+                        });
+                        
+                        // Add delay between tool executions for proper sequencing
+                        if (toolCall.tool === 'searchWeb') {
+                            console.log('Search completed, waiting before next step...');
+                            await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced delay
+                        }
+                        
+                    } catch (error) {
+                        console.error('Tool execution error for tool:', match, 'Error:', error);
+                        port.postMessage({
+                            type: 'tool_execution_inline',
+                            tool: toolCall?.tool || 'unknown',
+                            args: toolCall?.args || {},
+                            error: error.message,
+                            status: 'error',
+                            message: `Error executing ${toolCall?.tool || 'tool'}: ${error.message}`
                         });
                     }
+                }
+                
+                console.log('All tools executed, continuing with results. Total results:', toolResults.length);
+                
+                // Continue conversation with tool results
+                if (toolResults.length > 0) {
+                    await continueConversationWithToolResults(toolResults, port, client, systemMessage, originalMessage);
+                } else {
+                    console.log('No successful tool results, sending error response');
+                    port.postMessage({ error: 'No tools were executed successfully' });
+                }
+            }
+
+            // Function to continue conversation with tool results
+            async function continueConversationWithToolResults(toolResults, port, client, systemMessage, originalMessage) {
+                try {
+                    // Check if we just completed a search and need to extract content
+                    const searchResult = toolResults.find(result => result.tool === 'searchWeb' && result.result.success);
                     
-                    const thread = activeThreads.get(threadId);
-                    thread.messages.push({ role: 'user', content: message.message });
-                    thread.lastActive = Date.now();
-                    
-                    // Process based on client type
-                    if (client instanceof AzureOpenAIClient) {
-                        console.log('Starting Azure OpenAI streaming...');
-                        const azureMessages = [
-                            { role: 'system', content: systemMessage },
-                            { role: 'user', content: message.message }
-                        ];
+                    if (searchResult && searchResult.result.tabId) {
+                        console.log('Search completed, now extracting page content...');
                         
-                        await client.sendMessage(
-                            { messages: azureMessages }, 
-                            processStreamChunk
-                        );
-                    } else {
-                        console.log('Starting Claude streaming...');
-                        await client.sendMessage(
-                            message.message,
-                            processStreamChunk,
-                            systemMessage
-                        );
+                        // Wait for the search page to fully load
+                        await new Promise(resolve => setTimeout(resolve, 2000)); // Reduced from 3000ms
+                        
+                        // Automatically execute getPageContent
+                        try {
+                            port.postMessage({
+                                type: 'tool_execution_inline',
+                                tool: 'getPageContent',
+                                args: { tabId: searchResult.result.tabId },
+                                status: 'executing',
+                                message: 'Extracting search results...'
+                            });
+                            
+                            console.log('Executing getPageContent for tab:', searchResult.result.tabId);
+                            const contentResult = await executeGetPageContent({ tabId: searchResult.result.tabId });
+                            console.log('Content extraction result:', contentResult);
+                            
+                            if (contentResult.success) {
+                                port.postMessage({
+                                    type: 'tool_execution_inline',
+                                    tool: 'getPageContent',
+                                    args: { tabId: searchResult.result.tabId },
+                                    result: contentResult,
+                                    status: 'completed',
+                                    message: 'Search results extracted successfully'
+                                });
+                            } else {
+                                port.postMessage({
+                                    type: 'tool_execution_inline',
+                                    tool: 'getPageContent',
+                                    args: { tabId: searchResult.result.tabId },
+                                    result: contentResult,
+                                    status: 'error',
+                                    message: 'Content extraction failed, but continuing with search results'
+                                });
+                            }
+                            
+                            // Add the content extraction result to tool results regardless of success
+                            toolResults.push({
+                                tool: 'getPageContent',
+                                args: { tabId: searchResult.result.tabId },
+                                result: contentResult
+                            });
+                            
+                        } catch (error) {
+                            console.error('Error extracting page content:', error);
+                            port.postMessage({
+                                type: 'tool_execution_inline',
+                                tool: 'getPageContent',
+                                args: { tabId: searchResult.result.tabId },
+                                error: error.message,
+                                status: 'error',
+                                message: `Error extracting content: ${error.message}`
+                            });
+                            
+                            // Add failed result to tool results so we can still continue
+                            toolResults.push({
+                                tool: 'getPageContent',
+                                args: { tabId: searchResult.result.tabId },
+                                result: {
+                                    success: false,
+                                    error: error.message,
+                                    content: 'Content extraction failed'
+                                }
+                            });
+                        }
                     }
                     
-                    console.log('AI processing completed for message');
+                    // Format tool results for AI with better structure
+                    const toolResultsText = toolResults.map(result => {
+                        if (result.tool === 'getPageContent') {
+                            if (result.result.success && result.result.content) {
+                                // Use markdown content if available, otherwise fall back to regular content
+                                const contentToUse = result.result.markdownContent || result.result.content;
+                                return `SEARCH RESULTS EXTRACTED:
+URL: ${result.result.url}
+Title: ${result.result.title}
+Results Found: ${result.result.resultCount || 'Unknown'}
+Extracted At: ${result.result.extractedAt}
+
+CONTENT (MARKDOWN FORMAT):
+${contentToUse}`;
+                            } else {
+                                // Handle failed content extraction
+                                return `CONTENT EXTRACTION ATTEMPTED:
+Status: Failed
+Error: ${result.result.error || 'Unknown error'}
+Note: Search was completed but content extraction failed. Please provide a response based on the search query.`;
+                            }
+                        } else if (result.tool === 'searchWeb') {
+                            return `SEARCH EXECUTED:
+Query: ${result.args.query}
+Search URL: ${result.result.url}
+Status: ${result.result.success ? 'Success' : 'Failed'}
+Tab ID: ${result.result.tabId}`;
+                        }
+                        return `TOOL: ${result.tool}
+Args: ${JSON.stringify(result.args)}
+Result: ${JSON.stringify(result.result, null, 2)}`;
+                    }).join('\n\n');
                     
-                    // Final done message
-                    port.postMessage({ done: true });
+                    const followUpMessage = `Based on the search results below, provide a comprehensive and well-formatted response to the user's request: "${originalMessage.message}"
+
+TOOL EXECUTION RESULTS:
+${toolResultsText}
+
+INSTRUCTIONS:
+1. If content was successfully extracted, analyze the search results thoroughly and provide specific, current information
+2. Use the extracted search results to provide accurate, up-to-date information about the topic
+3. Format your response with proper markdown (use **bold** for important points, bullet points for lists, headers for sections)
+4. Include relevant links from the search results when mentioning specific information
+5. Organize the information logically with clear sections and headers
+6. If multiple search results cover the same topic, synthesize the information
+7. Be comprehensive but concise, focusing on the most relevant and recent information
+8. If content extraction failed, provide a helpful response based on the search query and general knowledge
+
+Please provide a professional, informative response based on the actual search results. Structure your response with clear headings and include specific details from the search results.`;
                     
-                } catch (streamError) {
-                    console.error('Streaming error:', streamError);
-                    port.postMessage({ error: 'AI processing error: ' + streamError.message });
+                    // Create follow-up stream processor that filters out any additional tool calls
+                    const followUpProcessor = (chunk) => {
+                        try {
+                            if (chunk.done) {
+                                port.postMessage({ done: true });
+                                return;
+                            }
+                            
+                            let content = '';
+                            if (chunk.type === 'delta' && chunk.content) {
+                                content = chunk.content;
+                            } else if (chunk.content) {
+                                content = chunk.content;
+                            } else if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta && chunk.choices[0].delta.content) {
+                                content = chunk.choices[0].delta.content;
+                            } else if (typeof chunk === 'string') {
+                                content = chunk;
+                            }
+                            
+                            if (content) {
+                                // Filter out any additional tool calls in the follow-up response
+                                let filteredContent = content;
+                                
+                                // Remove any JSON tool patterns
+                                const toolJsonPattern = /\{"tool":[^}]+\}/g;
+                                filteredContent = filteredContent.replace(toolJsonPattern, '');
+                                
+                                // Remove tool intention phrases
+                                const intentionPhrases = [
+                                    /I'll search for[^.]*\.\s*/gi,
+                                    /Let me search for[^.]*\.\s*/gi,
+                                    /I will search for[^.]*\.\s*/gi,
+                                    /Searching for[^.]*\.\s*/gi
+                                ];
+                                
+                                intentionPhrases.forEach(phrase => {
+                                    filteredContent = filteredContent.replace(phrase, '');
+                                });
+                                
+                                filteredContent = filteredContent.trim();
+                                
+                                if (filteredContent) {
+                                    port.postMessage({
+                                        type: 'delta',
+                                        content: filteredContent,
+                                        role: 'assistant'
+                                    });
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Error in follow-up processing:', error);
+                        }
+                    };
+                    
+                    // Send follow-up request to AI
+                    if (client instanceof AzureOpenAIClient) {
+                        const followUpMessages = [
+                            { role: 'system', content: systemMessage },
+                            { role: 'user', content: followUpMessage }
+                        ];
+                        await client.sendMessage({ messages: followUpMessages }, followUpProcessor);
+                    } else {
+                        await client.sendMessage(followUpMessage, followUpProcessor, systemMessage);
+                    }
+                    
+                } catch (error) {
+                    console.error('Error in follow-up conversation:', error);
+                    port.postMessage({ error: 'Error processing tool results: ' + error.message });
                 }
-            } else {
-                port.postMessage({ error: 'Empty message received' });
             }
+
+            // Helper function for tool execution messages
+            function getToolExecutionMessage(tool, status) {
+                const messages = {
+                    searchWeb: {
+                        executing: 'Searching the web...',
+                        completed: 'Web search completed'
+                    },
+                    getPageContent: {
+                        executing: 'Extracting page content...',
+                        completed: 'Page content extracted'
+                    },
+                    openNewTab: {
+                        executing: 'Opening new tab...',
+                        completed: 'New tab opened'
+                    },
+                    generateTool: {
+                        executing: 'Generating tool...',
+                        completed: 'Tool generated'
+                    }
+                };
+                
+                return messages[tool]?.[status] || `${status} ${tool}`;
+            }
+
+            // Process based on client type
+            if (client instanceof AzureOpenAIClient) {
+                console.log('Starting Azure OpenAI streaming...');
+                const azureMessages = [
+                    { role: 'system', content: enhancedSystemMessage },
+                    { role: 'user', content: message.message }
+                ];
+                
+                await client.sendMessage(
+                    { messages: azureMessages }, 
+                    processStreamChunk
+                );
+            } else {
+                console.log('Starting Claude streaming...');
+                await client.sendMessage(
+                    message.message,
+                    processStreamChunk,
+                    enhancedSystemMessage
+                );
+            }
+            
+            console.log('AI processing completed for message');
+            port.postMessage({ done: true });
+            
         } catch (error) {
             console.error('Error in message processing:', error);
-            port.postMessage({ error: error.message });
-        }
-    });
-
-    port.onDisconnect.addListener(() => {
-        console.log('Port disconnected');
-        if (chrome.runtime.lastError) {
-            console.error('Port disconnected with error:', chrome.runtime.lastError);
+            let errorMessage = error.message;
+            
+            if (error.message.includes('Extension context invalidated')) {
+                errorMessage = 'Extension context lost. Please refresh the page and try again.';
+                isConnected = false;
+            }
+            
+            port.postMessage({ error: errorMessage });
         }
     });
 });
 
+// Tool execution function
+async function executeToolCall(toolCall) {
+    const { tool, args } = toolCall;
+    
+    switch (tool) {
+        case 'searchWeb':
+            return await executeSearchWeb(args);
+        case 'openNewTab':
+            return await executeOpenNewTab(args);
+        case 'getPageContent':
+            return await executeGetPageContent(args);
+        case 'generateTool':
+            return await executeGenerateTool(args);
+        default:
+            throw new Error(`Unknown tool: ${tool}`);
+    }
+}
+
+async function executeSearchWeb(args) {
+    const { query, tabId } = args;
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    
+    console.log('Starting web search:', {
+        query: query,
+        searchUrl: searchUrl,
+        tabId: tabId
+    });
+    
+    try {
+        let targetTabId;
+        
+        if (tabId) {
+            console.log('Updating existing tab:', tabId);
+            await chrome.tabs.update(tabId, { url: searchUrl });
+            targetTabId = tabId;
+        } else {
+            console.log('Creating new tab for search');
+            const tab = await chrome.tabs.create({ url: searchUrl });
+            targetTabId = tab.id;
+            console.log('Created new tab:', targetTabId);
+        }
+        
+        // Wait for the page to load with timeout
+        await new Promise((resolve, reject) => {
+            const maxWaitTime = 15000; // 15 seconds timeout
+            const startTime = Date.now();
+            let attempts = 0;
+            const maxAttempts = 30; // Maximum 30 attempts (15 seconds)
+            
+            const checkLoading = () => {
+                attempts++;
+                const elapsed = Date.now() - startTime;
+                
+                // Check if we've exceeded timeout or max attempts
+                if (elapsed > maxWaitTime || attempts > maxAttempts) {
+                    console.log(`Search tab loading timeout after ${elapsed}ms, continuing anyway...`);
+                    resolve(); // Continue anyway, don't fail
+                    return;
+                }
+                
+                chrome.tabs.get(targetTabId, (tab) => {
+                    if (chrome.runtime.lastError) {
+                        console.log('Tab no longer exists, continuing anyway...');
+                        resolve(); // Tab might be closed, continue anyway
+                        return;
+                    }
+                    
+                    console.log(`Tab loading check ${attempts}: status=${tab.status}, url=${tab.url}`);
+                    
+                    if (tab.status === 'complete') {
+                        console.log(`Search tab loaded successfully after ${elapsed}ms`);
+                        resolve();
+                    } else {
+                        // Continue checking
+                        setTimeout(checkLoading, 500);
+                    }
+                });
+            };
+            
+            // Start checking after a short delay
+            setTimeout(checkLoading, 1000);
+        });
+        
+        const result = { 
+            success: true, 
+            tabId: targetTabId, 
+            url: searchUrl, 
+            query,
+            message: `Search completed for: ${query}`
+        };
+        
+        console.log('Search execution completed:', result);
+        return result;
+    } catch (error) {
+        console.error('Search execution error:', error);
+        throw new Error(`Search failed: ${error.message}`);
+    }
+}
+
+async function executeOpenNewTab(args) {
+    const { url } = args;
+    const tab = await chrome.tabs.create({ url: url || 'about:blank' });
+    return { success: true, tabId: tab.id, url: tab.url };
+}
+
+async function executeGetPageContent(args) {
+    const { tabId } = args;
+    
+    let targetTabId = tabId;
+    if (!targetTabId) {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        targetTabId = tabs[0]?.id;
+    }
+    
+    if (!targetTabId) {
+        throw new Error('No tab available for content extraction');
+    }
+    
+    try {
+        console.log('Extracting content from tab:', targetTabId);
+        
+        // First, check if the tab still exists and is accessible
+        const tab = await chrome.tabs.get(targetTabId);
+        if (!tab) {
+            throw new Error('Target tab no longer exists');
+        }
+        
+        console.log('Tab status:', tab.status, 'URL:', tab.url);
+        
+        // Wait a bit more for dynamic content to load
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Add timeout to script execution
+        const results = await Promise.race([
+            chrome.scripting.executeScript({
+                target: { tabId: targetTabId },
+                func: () => {
+                    try {
+                        console.log('Starting content extraction...');
+                        let content = '';
+                        let title = document.title || 'No title';
+                        let url = window.location.href || 'Unknown URL';
+                        let markdownContent = '';
+                        
+                        if (url.includes('google.com/search')) {
+                            console.log('Extracting Google search results...');
+                            
+                            // Multiple selector strategies for Google search results
+                            const searchResults = [];
+                            
+                            // Try different selectors for search results
+                            const selectors = [
+                                'div[data-ved] h3',
+                                '.g h3',
+                                '.rc h3', 
+                                '.MjjYud h3',
+                                'h3[class*="LC20lb"]',
+                                'h3.LC20lb',
+                                '[data-header-feature] h3',
+                                '.yuRUbf h3'
+                            ];
+                            
+                            let resultElements = [];
+                            for (const selector of selectors) {
+                                const elements = document.querySelectorAll(selector);
+                                if (elements.length > 0) {
+                                    resultElements = Array.from(elements);
+                                    console.log(`Found ${elements.length} results with selector: ${selector}`);
+                                    break;
+                                }
+                            }
+                            
+                            // If no results found with h3, try broader search
+                            if (resultElements.length === 0) {
+                                console.log('No h3 elements found, trying broader search...');
+                                const broadSelectors = [
+                                    '.g',
+                                    '.MjjYud',
+                                    '.rc',
+                                    '[data-ved]'
+                                ];
+                                
+                                for (const selector of broadSelectors) {
+                                    const containers = document.querySelectorAll(selector);
+                                    if (containers.length > 0) {
+                                        resultElements = Array.from(containers).map(container => {
+                                            return container.querySelector('h3, a[href*="http"]') || container;
+                                        }).filter(el => el);
+                                        console.log(`Found ${resultElements.length} results with container selector: ${selector}`);
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            console.log('Total result elements found:', resultElements.length);
+                            
+                            resultElements.forEach((element, index) => {
+                                if (index < 15) { // Increased to top 15 results
+                                    try {
+                                        let titleText = '';
+                                        let link = '';
+                                        let snippet = '';
+                                        
+                                        // Extract title
+                                        if (element.tagName === 'H3') {
+                                            titleText = element.textContent.trim();
+                                            const linkElement = element.closest('a') || element.querySelector('a');
+                                            link = linkElement ? linkElement.href : '';
+                                        } else {
+                                            const titleEl = element.querySelector('h3, a[href*="http"]');
+                                            if (titleEl) {
+                                                titleText = titleEl.textContent.trim();
+                                                if (titleEl.tagName === 'A') {
+                                                    link = titleEl.href;
+                                                } else {
+                                                    const linkEl = titleEl.closest('a') || titleEl.querySelector('a');
+                                                    link = linkEl ? linkEl.href : '';
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Extract snippet from parent container
+                                        const container = element.closest('.g, .rc, [data-ved], .MjjYud, .yuRUbf') || element.parentElement;
+                                        if (container) {
+                                            // Look for snippet in various places
+                                            const snippetSelectors = [
+                                                '.VwiC3b',
+                                                '.s3v9rd',
+                                                '.st',
+                                                '[data-sncf]',
+                                                '.IsZvec'
+                                            ];
+                                            
+                                            for (const snippetSelector of snippetSelectors) {
+                                                const snippetEl = container.querySelector(snippetSelector);
+                                                if (snippetEl) {
+                                                    snippet = snippetEl.textContent.trim();
+                                                    break;
+                                                }
+                                            }
+                                            
+                                            // Fallback: look for any text content in spans/divs
+                                            if (!snippet) {
+                                                const textElements = container.querySelectorAll('span, div');
+                                                for (const el of textElements) {
+                                                    const text = el.textContent.trim();
+                                                    if (text.length > 50 && text.length < 800 && 
+                                                        !text.includes('http') && 
+                                                        !text.includes('›') &&
+                                                        !text.includes('...') &&
+                                                        text !== titleText) {
+                                                        snippet = text;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Clean up the link
+                                        if (link && link.includes('/url?q=')) {
+                                            try {
+                                                const urlParams = new URLSearchParams(link.split('?')[1]);
+                                                link = urlParams.get('q') || link;
+                                            } catch (e) {
+                                                // Keep original link if parsing fails
+                                            }
+                                        }
+                                        
+                                        if (titleText && titleText.length > 3 && !titleText.includes('Search') && !titleText.includes('Google')) {
+                                            searchResults.push({
+                                                title: titleText,
+                                                link: link || 'No link available',
+                                                snippet: snippet || 'No snippet available',
+                                                index: index + 1
+                                            });
+                                        }
+                                    } catch (elementError) {
+                                        console.error('Error processing search result element:', elementError);
+                                    }
+                                }
+                            });
+                            
+                            console.log('Extracted search results:', searchResults.length);
+                            
+                            if (searchResults.length > 0) {
+                                // Create markdown formatted content
+                                markdownContent = `# Search Results for: ${decodeURIComponent(url.split('q=')[1]?.split('&')[0] || 'Unknown Query')}\n\n`;
+                                
+                                searchResults.forEach((result, index) => {
+                                    markdownContent += `## ${index + 1}. ${result.title}\n`;
+                                    markdownContent += `**Link:** ${result.link}\n\n`;
+                                    markdownContent += `${result.snippet}\n\n`;
+                                    markdownContent += `---\n\n`;
+                                });
+                                
+                                // Also create plain text version
+                                content = searchResults.map(result => 
+                                    `${result.index}. ${result.title}\nURL: ${result.link}\nDescription: ${result.snippet}\n---`
+                                ).join('\n\n');
+                            } else {
+                                console.log('No search results found, using fallback extraction');
+                                // Fallback to general text extraction
+                                const bodyText = document.body.textContent || '';
+                                content = bodyText.substring(0, 10000) || 'No content found';
+                                markdownContent = `# Page Content\n\n${content}`;
+                            }
+                        } else {
+                            console.log('Extracting regular page content...');
+                            // Regular page content extraction
+                            const bodyText = document.body.textContent || '';
+                            content = bodyText.substring(0, 50000) || 'No content found';
+                            
+                            // Create markdown version
+                            markdownContent = `# ${title}\n\n`;
+                            markdownContent += `**URL:** ${url}\n\n`;
+                            markdownContent += content;
+                        }
+                        
+                        const result = {
+                            title: title,
+                            url: url,
+                            content: content,
+                            markdownContent: markdownContent,
+                            html: document.documentElement.outerHTML.substring(0, 100000),
+                            extractedAt: new Date().toISOString(),
+                            resultCount: url.includes('google.com/search') ? (content.match(/---/g) || []).length : 0
+                        };
+                        
+                        console.log('Content extraction completed:', {
+                            title: result.title,
+                            url: result.url,
+                            contentLength: result.content?.length || 0,
+                            markdownLength: result.markdownContent?.length || 0,
+                            resultCount: result.resultCount
+                        });
+                        
+                        return result;
+                    } catch (extractionError) {
+                        console.error('Content extraction error:', extractionError);
+                        return {
+                            title: document.title || 'Error',
+                            url: window.location.href || 'Unknown',
+                            content: 'Error extracting content: ' + extractionError.message,
+                            markdownContent: '# Error\n\nFailed to extract content',
+                            html: '',
+                            error: extractionError.message
+                        };
+                    }
+                }
+            }),
+            // Timeout after 15 seconds (increased for better extraction)
+            new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Content extraction timeout')), 15000)
+            )
+        ]);
+        
+        console.log('Content extraction successful:', {
+            title: results[0].result.title,
+            url: results[0].result.url,
+            contentLength: results[0].result.content?.length || 0,
+            markdownLength: results[0].result.markdownContent?.length || 0,
+            resultCount: results[0].result.resultCount
+        });
+        
+        return {
+            success: true,
+            tabId: targetTabId,
+            ...results[0].result
+        };
+    } catch (error) {
+        console.error('Content extraction failed:', error);
+        
+        // Return a partial result instead of throwing
+        return {
+            success: false,
+            tabId: targetTabId,
+            title: 'Content Extraction Failed',
+            url: 'Unknown',
+            content: `Failed to extract content: ${error.message}`,
+            markdownContent: `# Content Extraction Failed\n\n${error.message}`,
+            html: '',
+            error: error.message
+        };
+    }
+}
+
+async function executeGenerateTool(args) {
+    const { description, name } = args;
+    
+    // This would integrate with your AI service to generate the tool
+    // For now, return a success response
+    const toolName = name || `generated_${Date.now()}`;
+    
+    return {
+        success: true,
+        toolName,
+        description,
+        message: `Generated tool "${toolName}" for: ${description}`
+    };
+}
+
+// Update the system message to include orchestrator capabilities
+const getSystemMessage = (context) => {
+    return `You are XatBrowser AI, a professional AI assistant with advanced browser automation capabilities.
+
+CRITICAL TOOL EXECUTION RULES:
+1. When users ask for current information, news, or data that requires web search, you MUST execute tools immediately
+2. Use EXACT JSON format for tool calls: {"tool": "toolName", "args": {"param": "value"}}
+3. Do NOT explain what you're going to do - just execute the tools
+4. After tool execution completes, provide a comprehensive response based on the results
+
+AVAILABLE TOOLS:
+- searchWeb(query, tabId?) - Search the web using Google
+- getPageContent(tabId?) - Extract content from a web page (automatically called after search)
+- openNewTab(url) - Open new browser tabs
+- generateTool(description, name?) - Create specialized tools
+
+TOOL EXECUTION EXAMPLES:
+User: "What are the latest tax news in USA?"
+Response: {"tool": "searchWeb", "args": {"query": "latest tax news USA 2024"}}
+
+User: "Open Google"
+Response: {"tool": "openNewTab", "args": {"url": "https://google.com"}}
+
+RESPONSE FORMATTING RULES:
+1. Use markdown formatting for better readability
+2. Use **bold** for important points and headlines
+3. Use ### for section headers
+4. Use bullet points (-) for lists
+5. Use numbered lists when showing steps or rankings
+6. Include relevant URLs when available
+
+IMPORTANT: 
+- Execute tools FIRST when users request current information
+- Do NOT say "I'll search for..." or "Let me search..." - just execute the tool
+- After tools complete, provide comprehensive responses with actual data
+- Format responses professionally with proper markdown
+
+Current browser context:
+${context}
+
+Remember: Execute tools immediately for current information requests, then provide detailed responses based on actual results.`;
+};
+
+// Update the message handling to use the new system message
 async function handleMessage(request, sender, sendResponse) {
     const { message, threadId, modelId, pageHtml, pageUrl, pageTitle } = request;
     
@@ -657,20 +1673,12 @@ async function handleMessage(request, sender, sendResponse) {
             throw new Error('Configuration not found. Please check your settings.');
         }
 
-        // Get basic tab information without accessing content
-        console.log('Getting basic tab info for chat...');
+        // Get basic tab information
         const tabContent = await getVisibleTabsInfo();
-        const activeTabs = tabContent.filter(tab => tab.isActive);
-        
-        // Log tab information
-        console.log('Active tabs:', activeTabs.map(tab => ({
-            title: tab.title,
-            url: tab.url
-        })));
-
-        // Format context from tabs
         const context = formatTabContext(tabContent);
-        console.log('Formatted basic tab context for chat');
+        
+        // Use the new system message
+        const systemMessage = getSystemMessage(context);
 
         // Get the appropriate client based on the selected model
         let client = null;
@@ -693,21 +1701,6 @@ async function handleMessage(request, sender, sendResponse) {
         if (!client) {
             throw new Error('Selected model not found in configuration');
         }
-
-        // Create a descriptive system message with tool instructions
-        let systemMessage = `You are a helpful AI assistant with access to browser tools.\n\nUse the \`tool\` field to request an action. Available tools:\n- getActiveTabInfo\n- getActiveTabHtml\n- openNewTab\n- searchWeb\n\nFormat tool requests as JSON, for example: {"tool": "openNewTab", "args": {"url": "https://example.com"}}.\n\nHere is information about the current page and other open tabs:\n\n`;
-        
-        // Add current page information if available
-        if (pageUrl && pageTitle) {
-            systemMessage += `## Current Page
-**Title:** ${pageTitle}
-**URL:** ${pageUrl}
-${pageHtml ? `\n### Page Content\n\`\`\`html\n${pageHtml}\n\`\`\`` : ''}\n\n`;
-        }
-        
-        // Add other tabs information
-        systemMessage += `## Other Open Tabs\n${context}\n\n`;
-        systemMessage += `Provide assistance based on this information. If the user asks about specific content within other pages (not the current page), kindly explain that you don't have access to the full content of those pages for privacy reasons.`;
 
         // Create streaming callback with debugging
         const onStream = (chunk) => {
@@ -754,7 +1747,7 @@ ${pageHtml ? `\n### Page Content\n\`\`\`html\n${pageHtml}\n\`\`\`` : ''}\n\n`;
                 // Azure requires a specific format
                 const azureMessages = [
                     { role: 'system', content: systemMessage },
-                    { role: 'user', content: message }
+                    { role: 'user', content: message.message }
                 ];
                 console.log('Azure streaming messages:', JSON.stringify({
                     system: azureMessages[0].content.length + ' chars',
