@@ -1,20 +1,37 @@
-class ChatUI {
+class ModernChatUI {
     constructor() {
         this.currentMessage = null;
         this.currentThread = 'default';
         this.threads = new Map();
         this.threads.set('default', {
             messages: [],
-            title: 'Current Chat'
+            title: 'Current Chat',
+            preview: 'Start a conversation...'
         });
         this.isProcessing = false;
         this.currentContent = '';
+        this.currentTheme = 'dark';
+
+        // Initialize marked.js for markdown parsing
+        if (typeof marked !== 'undefined') {
+            marked.setOptions({
+                highlight: function(code, lang) {
+                    if (typeof Prism !== 'undefined' && Prism.languages[lang]) {
+                        return Prism.highlight(code, Prism.languages[lang], lang);
+                    }
+                    return code;
+                },
+                breaks: true,
+                gfm: true
+            });
+        }
 
         // Initialize UI elements
         this.initializeElements();
         this.initializeEventListeners();
         this.initializeLogging();
         this.loadThreads();
+        this.initializeTheme();
         
         // Show privacy info
         this.showPrivacyInfo();
@@ -22,92 +39,117 @@ class ChatUI {
         // Load configuration and models
         this.loadConfig().catch(error => {
             this.log(this.logLevels.ERROR, 'Failed to load configuration', { error: error.message });
-            this.showNotification('Error loading configuration. Please check your settings.');
+            this.showNotification('Error loading configuration. Please check your settings.', 'error');
         });
     }
 
     initializeElements() {
+        // Main elements
         this.modelSelector = document.getElementById('modelSelector');
-        this.settingsButton = document.getElementById('settingsButton');
-        this.fullscreenButton = document.getElementById('fullscreenButton');
+        this.settingsBtn = document.getElementById('settingsBtn');
+        this.fullscreenBtn = document.getElementById('fullscreenBtn');
+        this.logToggleBtn = document.getElementById('logToggleBtn');
         this.statusDot = document.getElementById('statusDot');
         this.statusText = document.getElementById('statusText');
         this.messageInput = document.getElementById('messageInput');
-        this.sendButton = document.getElementById('sendButton');
-        this.messagesContainer = document.getElementById('messages');
+        this.sendBtn = document.getElementById('sendBtn');
+        this.messagesContainer = document.getElementById('messagesContainer');
 
         // New elements
-        this.threadList = document.querySelector('.thread-list');
-        this.newThreadBtn = document.querySelector('.new-thread-btn');
+        this.chatList = document.getElementById('chatList');
+        this.newChatBtn = document.getElementById('newChatBtn');
         this.logContent = document.getElementById('logContent');
-        this.logToggle = document.querySelector('.log-toggle');
+        this.logToggle = document.getElementById('logToggle');
+        this.logPanel = document.getElementById('logPanel');
+        this.themeSelector = document.getElementById('themeSelector');
+        this.sidebar = document.getElementById('sidebar');
 
         // Enable send button if model is selected
         this.handleModelChange();
     }
 
     initializeEventListeners() {
+        // Model and settings
         this.modelSelector.addEventListener('change', () => this.handleModelChange());
-        this.settingsButton.addEventListener('click', () => this.openSettings());
-        this.fullscreenButton.addEventListener('click', () => this.toggleFullscreen());
-        this.messageInput.addEventListener('input', () => {
-            const hasText = this.messageInput.value.trim().length > 0;
-            const hasModel = this.modelSelector.value !== '';
-            this.sendButton.disabled = !hasText || !hasModel;
-        });
+        this.settingsBtn.addEventListener('click', () => this.openSettings());
+        this.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
+        this.logToggleBtn.addEventListener('click', () => this.toggleLogPanel());
+        this.themeSelector.addEventListener('change', (e) => this.changeTheme(e.target.value));
+
+        // Input handling
+        this.messageInput.addEventListener('input', () => this.handleInputChange());
         this.messageInput.addEventListener('keydown', (e) => this.handleKeyPress(e));
-        this.sendButton.addEventListener('click', () => {
-            if (!this.sendButton.disabled) {
+        this.sendBtn.addEventListener('click', () => {
+            if (!this.sendBtn.disabled) {
                 this.handleSendMessage();
             }
         });
 
-        // Add keyboard shortcut for sending messages
-        this.messageInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !this.sendButton.disabled) {
-                e.preventDefault();
-                this.handleSendMessage();
-            }
+        // Auto-resize textarea
+        this.messageInput.addEventListener('input', () => {
+            this.messageInput.style.height = 'auto';
+            this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 150) + 'px';
         });
 
-        // New listeners
-        this.newThreadBtn.addEventListener('click', () => this.createNewThread());
+        // Chat management
+        this.newChatBtn.addEventListener('click', () => this.createNewThread());
         this.logToggle.addEventListener('click', () => this.toggleLogPanel());
-        this.threadList.addEventListener('click', (e) => {
-            const threadItem = e.target.closest('.thread-item');
-            if (threadItem) {
-                this.switchThread(threadItem.dataset.threadId);
+        this.chatList.addEventListener('click', (e) => {
+            const chatItem = e.target.closest('.chat-item');
+            if (chatItem) {
+                this.switchThread(chatItem.dataset.chatId);
             }
         });
 
-        // Add keyboard shortcut for fullscreen (F11)
+        // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
             if (e.key === 'F11') {
                 e.preventDefault();
                 this.toggleFullscreen();
             }
+            if (e.ctrlKey && e.key === 'n') {
+                e.preventDefault();
+                this.createNewThread();
+            }
+            if (e.ctrlKey && e.key === 'l') {
+                e.preventDefault();
+                this.toggleLogPanel();
+            }
         });
 
-        // Listen for fullscreen changes (e.g., when user presses Escape)
+        // Fullscreen change detection
         document.addEventListener('fullscreenchange', () => {
             if (document.fullscreenElement) {
-                this.fullscreenButton.textContent = '🗗';
-                this.fullscreenButton.title = 'Exit Fullscreen';
+                this.fullscreenBtn.textContent = '🗗';
+                this.fullscreenBtn.title = 'Exit Fullscreen';
             } else {
-                this.fullscreenButton.textContent = '🖥️';
-                this.fullscreenButton.title = 'Enter Fullscreen';
+                this.fullscreenBtn.textContent = '🖥️';
+                this.fullscreenBtn.title = 'Enter Fullscreen';
             }
         });
     }
 
     initializeLogging() {
         this.logs = [];
-        this.maxLogs = 1000; // Maximum number of logs to keep
+        this.maxLogs = 1000;
         this.logLevels = {
             INFO: 'info',
             WARNING: 'warning',
             ERROR: 'error'
         };
+    }
+
+    initializeTheme() {
+        const savedTheme = localStorage.getItem('chatTheme') || 'dark';
+        this.themeSelector.value = savedTheme;
+        this.changeTheme(savedTheme);
+    }
+
+    changeTheme(theme) {
+        this.currentTheme = theme;
+        document.body.setAttribute('data-theme', theme);
+        localStorage.setItem('chatTheme', theme);
+        this.log(this.logLevels.INFO, `Theme changed to: ${theme}`);
     }
 
     log(level, message, data = null) {
@@ -128,11 +170,11 @@ class ChatUI {
         if (level === this.logLevels.ERROR || 
             message.includes('Error') || 
             message.includes('Active tabs') ||
-            message.includes('Stream')) {
+            message.includes('Stream') ||
+            message.includes('Theme')) {
             this.addLogEntry(logEntry);
         }
 
-        // Always log to console for debugging
         console.log(`[${level.toUpperCase()}] ${message}`, data || '');
     }
 
@@ -140,15 +182,16 @@ class ChatUI {
         const entryElement = document.createElement('div');
         entryElement.className = `log-entry ${logEntry.level}`;
         
-        const timestamp = document.createElement('span');
-        timestamp.className = 'timestamp';
+        const timestamp = document.createElement('div');
+        timestamp.className = 'log-timestamp';
         timestamp.textContent = new Date(logEntry.timestamp).toLocaleTimeString();
         
-        const level = document.createElement('span');
-        level.className = 'level';
-        level.textContent = logEntry.level.toUpperCase();
+        const level = document.createElement('div');
+        level.className = 'log-level';
+        level.textContent = logEntry.level;
         
-        const message = document.createElement('span');
+        const message = document.createElement('div');
+        message.className = 'log-message';
         message.textContent = logEntry.message;
         
         entryElement.appendChild(timestamp);
@@ -158,6 +201,9 @@ class ChatUI {
         if (logEntry.data) {
             const dataElement = document.createElement('pre');
             dataElement.textContent = JSON.stringify(logEntry.data, null, 2);
+            dataElement.style.marginTop = '0.5rem';
+            dataElement.style.fontSize = '0.7rem';
+            dataElement.style.opacity = '0.8';
             entryElement.appendChild(dataElement);
         }
 
@@ -166,814 +212,616 @@ class ChatUI {
     }
 
     toggleLogPanel() {
-        const logPanel = document.querySelector('.log-panel');
-        const isCollapsed = logPanel.style.display === 'none';
-        logPanel.style.display = isCollapsed ? 'flex' : 'none';
-        this.logToggle.textContent = isCollapsed ? '▼' : '▲';
+        this.logPanel.classList.toggle('collapsed');
+        const isCollapsed = this.logPanel.classList.contains('collapsed');
+        this.logToggle.textContent = isCollapsed ? '▲' : '▼';
+        this.logToggleBtn.style.opacity = isCollapsed ? '0.6' : '1';
     }
 
     createNewThread() {
         const threadId = `thread_${Date.now()}`;
-        const threadTitle = `New Thread ${this.threads.size + 1}`;
+        const threadTitle = `New Chat ${this.threads.size}`;
         
         this.threads.set(threadId, {
             messages: [],
-            title: threadTitle
+            title: threadTitle,
+            preview: 'Start a conversation...'
         });
 
-        this.addThreadToList(threadId, threadTitle);
+        this.addThreadToList(threadId, threadTitle, 'Start a conversation...');
         this.switchThread(threadId);
         this.log(this.logLevels.INFO, `Created new thread: ${threadTitle}`);
     }
 
-    addThreadToList(threadId, title) {
-        const threadItem = document.createElement('div');
-        threadItem.className = 'thread-item';
-        threadItem.dataset.threadId = threadId;
+    addThreadToList(threadId, title, preview) {
+        const chatItem = document.createElement('div');
+        chatItem.className = 'chat-item';
+        chatItem.dataset.chatId = threadId;
         
-        const icon = document.createElement('span');
-        icon.className = 'thread-icon';
-        icon.textContent = '💬';
+        const titleDiv = document.createElement('div');
+        titleDiv.className = 'chat-title';
+        titleDiv.textContent = title;
         
-        const titleSpan = document.createElement('span');
-        titleSpan.textContent = title;
+        const previewDiv = document.createElement('div');
+        previewDiv.className = 'chat-preview';
+        previewDiv.textContent = preview;
         
-        threadItem.appendChild(icon);
-        threadItem.appendChild(titleSpan);
-        this.threadList.appendChild(threadItem);
+        chatItem.appendChild(titleDiv);
+        chatItem.appendChild(previewDiv);
+        
+        this.chatList.appendChild(chatItem);
     }
 
     switchThread(threadId) {
-        // Update active thread
-        document.querySelectorAll('.thread-item').forEach(item => {
-            item.classList.toggle('active', item.dataset.threadId === threadId);
+        // Update active chat item
+        document.querySelectorAll('.chat-item').forEach(item => {
+            item.classList.remove('active');
         });
+        document.querySelector(`[data-chat-id="${threadId}"]`).classList.add('active');
 
         this.currentThread = threadId;
-        this.clearMessages();
         this.loadThreadMessages(threadId);
-        this.log(this.logLevels.INFO, `Switched to thread: ${this.threads.get(threadId).title}`);
+        this.saveThreads();
     }
 
     loadThreadMessages(threadId) {
         const thread = this.threads.get(threadId);
         if (!thread) return;
 
+        this.messagesContainer.innerHTML = '';
         thread.messages.forEach(msg => {
             this.addMessageToUI(msg.role, msg.content, msg.isError);
         });
+        this.scrollToBottom();
     }
 
     loadThreads() {
-        // Load threads from storage
-        chrome.storage.local.get(['chatThreads'], (result) => {
-            if (result.chatThreads) {
-                this.threads = new Map(Object.entries(result.chatThreads));
-                this.threads.forEach((thread, threadId) => {
-                    this.addThreadToList(threadId, thread.title);
-                });
+        try {
+            const saved = localStorage.getItem('chatThreads');
+            if (saved) {
+                const threadsData = JSON.parse(saved);
+                this.threads = new Map(threadsData);
             }
-        });
+        } catch (error) {
+            this.log(this.logLevels.ERROR, 'Failed to load threads', { error: error.message });
+        }
     }
 
     saveThreads() {
-        const threadsObj = Object.fromEntries(this.threads);
-        chrome.storage.local.set({ chatThreads: threadsObj });
+        try {
+            localStorage.setItem('chatThreads', JSON.stringify([...this.threads]));
+        } catch (error) {
+            this.log(this.logLevels.ERROR, 'Failed to save threads', { error: error.message });
+        }
     }
 
     async loadConfig() {
         try {
-            this.log(this.logLevels.INFO, 'Loading configuration...');
-            const response = await chrome.runtime.sendMessage({ type: 'GET_CONFIG' });
-            
-            if (!response) {
-                throw new Error('No configuration received');
-            }
-
-            this.log(this.logLevels.INFO, 'Configuration loaded', { 
-                hasAzureOpenAi: !!response.AzureOpenAi,
-                hasClaudeAi: !!response.ClaudeAi
+            console.log('Loading configuration...');
+            const response = await chrome.runtime.sendMessage({
+                type: 'GET_CONFIG'  // Use the correct message type expected by background script
             });
 
-            if (response.AzureOpenAi || response.ClaudeAi) {
+            console.log('Configuration response:', response);
+
+            if (response && (response.AzureOpenAi || response.ClaudeAi)) {
                 this.updateModelSelector(response);
-                this.log(this.logLevels.INFO, 'Models updated in selector');
+                this.log(this.logLevels.INFO, 'Configuration loaded successfully');
+            } else if (response && response.error) {
+                throw new Error(response.error);
             } else {
-                this.showNotification('No AI models configured. Please add your settings in the extension options.');
-                this.statusText.textContent = 'No models available';
-                this.statusDot.style.backgroundColor = '#ff4444';
-                this.log(this.logLevels.WARNING, 'No AI models found in configuration');
+                console.warn('No valid configuration found:', response);
+                this.showNotification('No AI models configured. Please set up your models in the extension settings.', 'error');
+                this.updateStatus('error', 'No models configured');
             }
         } catch (error) {
-            this.log(this.logLevels.ERROR, 'Error loading configuration', { error: error.message });
-            this.showNotification('Error loading configuration. Please check your settings.');
-            this.statusText.textContent = 'Error loading models';
-            this.statusDot.style.backgroundColor = '#ff4444';
-            throw error;
+            console.error('Configuration loading error:', error);
+            this.log(this.logLevels.ERROR, 'Failed to load configuration', { error: error.message });
+            this.showNotification('Failed to load configuration. Please check your settings.', 'error');
+            this.updateStatus('error', 'Configuration error');
         }
     }
 
     updateModelSelector(config) {
-        this.log(this.logLevels.INFO, 'Updating model selector', { config });
+        this.modelSelector.innerHTML = '<option value="">Select AI Model</option>';
         
-        // Clear existing options
-        this.modelSelector.innerHTML = '<option value="">Select Model</option>';
-        
+        let firstModel = null;
         let modelCount = 0;
 
+        // Handle Azure OpenAI models
         if (config.AzureOpenAi) {
             Object.entries(config.AzureOpenAi).forEach(([modelId, models]) => {
                 if (Array.isArray(models) && models.length > 0) {
                     const model = models[0];
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = 'Azure OpenAI';
+                    
                     const option = document.createElement('option');
                     option.value = modelId;
                     option.textContent = `Azure: ${model.ModelName || modelId}`;
-                    this.modelSelector.appendChild(option);
+                    optgroup.appendChild(option);
+                    
+                    this.modelSelector.appendChild(optgroup);
+                    
+                    if (!firstModel) {
+                        firstModel = modelId;
+                    }
                     modelCount++;
-                    this.log(this.logLevels.INFO, 'Added Azure model', { modelId, modelName: model.ModelName });
                 }
             });
         }
 
+        // Handle Claude AI models
         if (config.ClaudeAi) {
             Object.entries(config.ClaudeAi).forEach(([modelId, models]) => {
                 if (Array.isArray(models) && models.length > 0) {
                     const model = models[0];
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = 'Claude AI';
+                    
                     const option = document.createElement('option');
                     option.value = modelId;
                     option.textContent = `Claude: ${model.ModelName || modelId}`;
-                    this.modelSelector.appendChild(option);
+                    optgroup.appendChild(option);
+                    
+                    this.modelSelector.appendChild(optgroup);
+                    
+                    if (!firstModel) {
+                        firstModel = modelId;
+                    }
                     modelCount++;
-                    this.log(this.logLevels.INFO, 'Added Claude model', { modelId, modelName: model.ModelName });
                 }
             });
         }
 
-        // Update status based on available models
-        const hasModels = modelCount > 0;
-        this.statusDot.style.backgroundColor = hasModels ? '#4CAF50' : '#ff4444';
-        this.statusText.textContent = hasModels ? 
-            'Select a model to begin' : 
-            'No models available';
-        this.sendButton.disabled = !hasModels;
+        // Load saved model selection or auto-select first model
+        const savedModel = localStorage.getItem('selectedModel');
+        if (savedModel && this.modelSelector.querySelector(`option[value="${savedModel}"]`)) {
+            this.modelSelector.value = savedModel;
+        } else if (firstModel) {
+            // Auto-select the first available model
+            this.modelSelector.value = firstModel;
+            localStorage.setItem('selectedModel', firstModel);
+            this.log(this.logLevels.INFO, `Auto-selected first available model: ${firstModel}`);
+        }
 
-        this.log(this.logLevels.INFO, 'Model selector updated', { 
-            totalModels: modelCount,
-            hasModels
-        });
+        // Update UI state
+        this.handleModelChange();
+        
+        if (modelCount === 0) {
+            this.showNotification('No AI models configured. Please add your settings in the extension options.', 'error');
+            this.updateStatus('error', 'No models available');
+            this.showConfigurationHelp();
+        } else {
+            this.log(this.logLevels.INFO, `Loaded ${modelCount} AI models`);
+        }
     }
 
     handleModelChange() {
-        const selectedModel = this.modelSelector.value;
-        this.statusDot.className = selectedModel ? 'status-dot active' : 'status-dot';
-        this.statusText.textContent = selectedModel ? 
-            `Model selected: ${selectedModel}` : 
-            'Select a model to begin';
+        const hasModel = this.modelSelector.value !== '';
+        const hasText = this.messageInput.value.trim().length > 0;
         
-        // Update send button state
-        this.handleInputChange();
+        this.sendBtn.disabled = !hasText || !hasModel;
+        
+        if (hasModel) {
+            localStorage.setItem('selectedModel', this.modelSelector.value);
+            this.updateStatus('connected', `Connected to ${this.modelSelector.value.split(':')[1]}`);
+        } else {
+            this.updateStatus('', 'Select a model to begin');
+        }
     }
 
     handleInputChange() {
         const hasText = this.messageInput.value.trim().length > 0;
         const hasModel = this.modelSelector.value !== '';
-        this.sendButton.disabled = !hasText || !hasModel || this.isProcessing;
+        this.sendBtn.disabled = !hasText || !hasModel;
     }
 
     handleKeyPress(e) {
-        if (e.key === 'Enter' && !e.shiftKey && !this.sendButton.disabled) {
+        if (e.key === 'Enter' && !e.shiftKey && !this.sendBtn.disabled) {
             e.preventDefault();
             this.handleSendMessage();
         }
     }
 
     async handleSendMessage() {
-        if (this.isProcessing) {
-            this.log(this.logLevels.WARNING, 'Already processing a message, ignoring new request');
-            return;
-        }
-
         const message = this.messageInput.value.trim();
         if (!message || !this.modelSelector.value) {
-            this.log(this.logLevels.WARNING, 'Invalid input', {
-                hasMessage: !!message,
-                selectedModel: this.modelSelector.value
-            });
-            this.showNotification('Please select a model and enter a message');
             return;
         }
 
-        this.isProcessing = true;
-        let port = null;
+        // Add user message to UI and thread
+        this.addMessageToThread('user', message);
+        this.addMessageToUI('user', message);
+        
+        // Clear input and show typing indicator
+        this.messageInput.value = '';
+        this.handleInputChange();
+        this.showTypingIndicator();
+        this.setUIState(false);
 
         try {
-            this.log(this.logLevels.INFO, 'Starting message processing', {
-                modelId: this.modelSelector.value,
-                messageLength: message.length,
-                threadId: this.currentThread
-            });
-
-            // Update status to processing
-            this.updateStatus('processing', 'Processing your request...');
-
-            // Clear input first
-            this.messageInput.value = '';
-            this.handleInputChange();
-
-            // Disable UI elements
-            this.setUIState(false);
-
-            // Add user message to UI and thread
-            const userMessageDiv = this.addMessageToUI('user', message);
-            this.addMessageToThread('user', message);
-
-            // Show typing indicator
-            this.showTypingIndicator();
-
-            // Create initial assistant message
+            // Create assistant message container
             this.currentMessage = this.addMessageToUI('assistant', '');
             this.currentContent = '';
 
-            // Create a dedicated port for this conversation
-            port = chrome.runtime.connect({ name: 'chat' });
-            let isFirstChunk = true;
-            
-            // Set up port message listener with enhanced tool execution handling
-            port.onMessage.addListener((response) => {
-                this.log(this.logLevels.INFO, 'Received port message', { 
-                    type: response.type,
-                    hasContent: !!response.content,
-                    isDone: !!response.done,
-                    hasError: !!response.error
-                });
-                
-                if (response.error) {
-                    this.hideTypingIndicator();
-                    this.removeStreamingIndicator();
-                    throw new Error(response.error);
-                }
-                
-                if (response.type === 'delta' && response.content) {
-                    // Handle streaming content
-                    const content = response.content;
-                    
-                    if (content && content.trim()) {
-                        if (isFirstChunk) {
-                            this.hideTypingIndicator();
-                            isFirstChunk = false;
-                        }
-                        
-                        this.handleStreamingContent(content);
-                    }
-                } else if (response.type === 'tool_execution_inline') {
-                    // Handle inline tool execution like Cursor
-                    if (!this.currentMessage) {
-                        this.currentMessage = this.addMessageToUI('assistant', '');
-                        isFirstChunk = false;
-                    }
-                    this.handleInlineToolExecution(response, this.currentMessage);
-                } else if (response.done) {
-                    this.hideTypingIndicator();
-                    this.removeStreamingIndicator();
-                    this.updateStatus('active', 'Ready');
-                    this.log(this.logLevels.INFO, 'Stream complete', { 
-                        contentLength: this.currentContent.length
-                    });
-                    
-                    if (this.currentContent.trim()) {
-                        this.addMessageToThread('assistant', this.currentContent);
-                    }
-                    
-                    this.currentMessage = null;
-                    this.currentContent = '';
-                    port.disconnect();
-                }
-            });
-            
-            // Handle port disconnect
-            port.onDisconnect.addListener(() => {
-                if (chrome.runtime.lastError) {
-                    this.log(this.logLevels.ERROR, 'Port disconnected with error', {
-                        error: chrome.runtime.lastError.message
-                    });
-                }
-            });
-
-            // Get page content for context
-            const pageContent = this.preprocessHtml();
-            const pageUrl = window.location.href;
-            const pageTitle = document.title;
-
-            // Send the message through the port
-            this.log(this.logLevels.INFO, 'Sending message through port', {
-                modelId: this.modelSelector.value,
-                threadId: this.currentThread
-            });
-            
-            port.postMessage({
-                type: 'PROCESS_MESSAGE',
-                message: message,
-                threadId: this.currentThread,
-                modelId: this.modelSelector.value,
-                pageContent: pageContent,
-                pageUrl: pageUrl,
-                pageTitle: pageTitle
+            // Send message using streaming
+            await this.sendMessageToBackground(message, (content) => {
+                this.handleStreamingContent(content);
             });
 
         } catch (error) {
-            this.log(this.logLevels.ERROR, 'Error in message processing', {
-                error: error.message,
-                stack: error.stack
-            });
-            
-            // Parse the error message for better user feedback
-            let errorMessage = error.message;
-            if (error.message.includes('permission')) {
-                errorMessage = 'This extension uses only basic tab information for privacy purposes.';
-            } else if (error.message.includes('API') || error.message.includes('key')) {
-                errorMessage = 'API error: Please check your API keys and endpoints in settings.';
-            } else if (error.message.includes('network')) {
-                errorMessage = 'Network error: Please check your connection and API endpoints.';
-            } else if (error.message.includes('configuration')) {
-                errorMessage = 'Configuration error: Please check your AI model settings in the options page.';
-            }
-            
-            // Show error in UI
-            if (this.currentMessage) {
-                this.currentMessage.textContent = `Error: ${errorMessage}`;
-                this.currentMessage.classList.add('error');
-            } else {
-                this.addMessageToUI('assistant', `Error: ${errorMessage}`, true);
-            }
-            this.addMessageToThread('assistant', `Error: ${errorMessage}`, true);
-            
-            // Update status to error
-            this.updateStatus('error', 'Error occurred');
-            
-            // Show notification
-            this.showNotification(`Error: ${errorMessage}`);
-            
-            // Automatically show log panel when there's an error
-            const logPanel = document.querySelector('.log-panel');
-            if (logPanel) {
-                logPanel.style.display = 'flex';
-                this.logToggle.textContent = '▼';
-            }
-            
-            // Disconnect port if it exists
-            if (port) {
-                try {
-                    port.disconnect();
-                } catch (e) {
-                    // Ignore errors on disconnect
-                }
-            }
-        } finally {
-            // Re-enable UI
-            this.setUIState(true);
+            console.error('Error sending message:', error);
             this.hideTypingIndicator();
-            this.isProcessing = false;
             
-            // Restore status if not in error state
-            if (!this.statusDot.classList.contains('error')) {
-                this.updateStatus('active', 'Ready');
-            }
-            
-            this.log(this.logLevels.INFO, 'Message processing completed');
+            // Show error message
+            const errorMessage = `Error: ${error.message}`;
+            this.addMessageToThread('assistant', errorMessage, true);
+            this.addMessageToUI('assistant', errorMessage, true);
+        } finally {
+            this.setUIState(true);
         }
     }
 
     setUIState(enabled) {
-        this.messageInput.disabled = !enabled;
-        this.sendButton.disabled = !enabled;
+        this.isProcessing = !enabled;
         this.modelSelector.disabled = !enabled;
-        
-        if (enabled) {
-            this.messageInput.focus();
-            this.handleInputChange();
-        }
+        this.sendBtn.disabled = !enabled || !this.messageInput.value.trim() || !this.modelSelector.value;
     }
 
     handleStreamingContent(content) {
-        if (!content) {
-            this.log(this.logLevels.WARNING, 'Received empty content chunk');
-            return;
-        }
-        
         if (!this.currentMessage) {
-            this.log(this.logLevels.WARNING, 'No current message element for content');
-            return;
+            this.hideTypingIndicator();
+            this.currentMessage = this.addMessageToUI('assistant', '');
+            this.currentContent = '';
         }
-        
-        this.log(this.logLevels.INFO, 'Adding content from chunk', {
-            contentLength: content.length,
-            totalLength: (this.currentContent + content).length
-        });
-        
-        // Add streaming indicator if not present
-        let contentDiv = this.currentMessage.querySelector('.message-content');
-        if (!contentDiv) {
-            contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            this.currentMessage.insertBefore(contentDiv, this.currentMessage.firstChild);
-        }
-        
-        // Add streaming indicator
-        let indicator = this.currentMessage.querySelector('.streaming-indicator');
-        if (!indicator) {
-            indicator = document.createElement('span');
-            indicator.className = 'streaming-indicator';
-            indicator.textContent = ' (streaming...)';
-            indicator.style.cssText = 'color: #666; font-style: italic; font-size: 0.9em; margin-left: 8px; animation: pulse 1.5s infinite;';
-            this.currentMessage.appendChild(indicator);
-        }
-        
+
+        const contentDiv = this.currentMessage.querySelector('.message-content');
+        if (!contentDiv) return;
+
         // Append content and reformat the entire message
         this.currentContent += content;
         
-        // Apply markdown formatting to the complete text
-        let formattedText = this.currentContent;
+        // Check for sequential thinking patterns
+        const thinkingMatch = this.currentContent.match(/\[THINKING:(\d+)\/(\d+)\](.*?)\[\/THINKING\]/s);
+        if (thinkingMatch) {
+            const [fullMatch, currentStep, totalSteps, thinkingContent] = thinkingMatch;
+            this.addThinkingStep(parseInt(currentStep), parseInt(totalSteps), thinkingContent.trim());
+            
+            // Remove thinking content from main response
+            this.currentContent = this.currentContent.replace(fullMatch, '');
+        }
         
-        // Convert **bold** to HTML
-        formattedText = formattedText.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        // Check for tool execution patterns
+        const toolMatch = this.currentContent.match(/\[TOOL:(.*?)\](.*?)\[\/TOOL\]/s);
+        if (toolMatch) {
+            const [fullMatch, toolName, toolResult] = toolMatch;
+            this.showToolExecution(toolName, toolResult);
+            
+            // Remove tool content from main response
+            this.currentContent = this.currentContent.replace(fullMatch, '');
+        }
         
-        // Convert ### headers to HTML
-        formattedText = formattedText.replace(/^### (.*$)/gm, '<h3 style="margin: 16px 0 8px 0; color: #e0e0e0; font-size: 1.1em; font-weight: 600;">$1</h3>');
+        // Use marked.js for markdown parsing if available
+        let formattedContent;
+        if (typeof marked !== 'undefined') {
+            formattedContent = marked.parse(this.currentContent);
+        } else {
+            // Fallback to basic markdown formatting
+            formattedContent = this.parseBasicMarkdown(this.currentContent);
+        }
         
-        // Convert bullet points to HTML
-        formattedText = formattedText.replace(/^- (.*$)/gm, '<div style="margin: 4px 0; padding-left: 16px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF;">•</span>$1</div>');
+        contentDiv.innerHTML = formattedContent;
         
-        // Convert numbered lists to HTML
-        formattedText = formattedText.replace(/^(\d+)\. (.*$)/gm, '<div style="margin: 4px 0; padding-left: 20px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF; font-weight: 600;">$1.</span>$2</div>');
+        // Highlight code blocks if Prism is available
+        if (typeof Prism !== 'undefined') {
+            Prism.highlightAllUnder(contentDiv);
+        }
         
-        // Convert URLs to clickable links
-        formattedText = formattedText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" style="color: #007AFF; text-decoration: none; border-bottom: 1px solid rgba(0, 122, 255, 0.3);">$1</a>');
+        // Add copy buttons to code blocks
+        this.addCopyButtonsToCodeBlocks(contentDiv);
         
-        // Preserve line breaks
-        formattedText = formattedText.replace(/\n/g, '<br>');
-        
-        contentDiv.innerHTML = formattedText;
         this.scrollToBottom();
     }
 
+    addThinkingStep(currentStep, totalSteps, content, isRevision = false) {
+        const thinkingContainer = this.getOrCreateThinkingContainer();
+        
+        const stepDiv = document.createElement('div');
+        stepDiv.className = `thinking-step ${isRevision ? 'revision' : 'active'}`;
+        stepDiv.innerHTML = `
+            <div class="thinking-number ${isRevision ? 'revision' : ''}">${currentStep}</div>
+            <div class="thinking-content">
+                ${this.parseBasicMarkdown(content)}
+                <div class="thinking-meta">
+                    Step ${currentStep} of ${totalSteps}${isRevision ? ' (Revision)' : ''}
+                </div>
+            </div>
+        `;
+        
+        thinkingContainer.appendChild(stepDiv);
+        
+        // Mark previous steps as completed
+        const allSteps = thinkingContainer.querySelectorAll('.thinking-step');
+        allSteps.forEach((step, index) => {
+            if (index < allSteps.length - 1) {
+                step.classList.remove('active');
+                step.classList.add('completed');
+                const number = step.querySelector('.thinking-number');
+                if (number) number.classList.add('completed');
+            }
+        });
+        
+        this.scrollToBottom();
+    }
+
+    getOrCreateThinkingContainer() {
+        let container = this.messagesContainer.querySelector('.thinking-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.className = 'thinking-container';
+            container.style.cssText = `
+                margin: 1rem 0;
+                padding: 1rem;
+                background: var(--bg-card);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                border-left: 4px solid var(--primary);
+            `;
+            
+            const header = document.createElement('div');
+            header.style.cssText = `
+                font-weight: 600;
+                color: var(--primary);
+                margin-bottom: 1rem;
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+            `;
+            header.innerHTML = '🧠 AI Thinking Process';
+            
+            container.appendChild(header);
+            this.messagesContainer.appendChild(container);
+        }
+        return container;
+    }
+
+    showToolExecution(toolName, result) {
+        const toolDiv = document.createElement('div');
+        toolDiv.className = 'tool-indicator completed';
+        toolDiv.innerHTML = `
+            <div class="tool-icon completed">🔧</div>
+            <div class="tool-text">
+                <strong>${this.formatToolName(toolName)}</strong>: ${result}
+            </div>
+        `;
+        
+        if (this.currentMessage) {
+            this.currentMessage.appendChild(toolDiv);
+        } else {
+            this.messagesContainer.appendChild(toolDiv);
+        }
+        
+        this.scrollToBottom();
+    }
+
+    formatToolName(toolName) {
+        const toolNames = {
+            'openNewTab': 'Open New Tab',
+            'searchWeb': 'Web Search',
+            'getPageContent': 'Extract Content',
+            'generateTool': 'Generate Tool'
+        };
+        return toolNames[toolName] || toolName;
+    }
+
+    parseBasicMarkdown(text) {
+        let html = text;
+        
+        // Headers
+        html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
+        html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
+        html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
+        
+        // Bold and italic
+        html = html.replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>');
+        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+        
+        // Code blocks
+        html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
+            return `<pre><code class="language-${lang || 'text'}">${this.escapeHtml(code.trim())}</code></pre>`;
+        });
+        
+        // Inline code
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        
+        // Lists
+        html = html.replace(/^- (.*$)/gm, '<li>$1</li>');
+        html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+        html = html.replace(/^(\d+)\. (.*$)/gm, '<li>$2</li>');
+        
+        // Links
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+        html = html.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>');
+        
+        // Blockquotes
+        html = html.replace(/^> (.*$)/gm, '<blockquote>$1</blockquote>');
+        
+        // Line breaks
+        html = html.replace(/\n/g, '<br>');
+        
+        return html;
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    addCopyButtonsToCodeBlocks(container) {
+        const codeBlocks = container.querySelectorAll('pre code');
+        codeBlocks.forEach(codeBlock => {
+            const pre = codeBlock.parentElement;
+            if (pre.querySelector('.copy-btn')) return; // Already has copy button
+            
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'copy-btn';
+            copyBtn.textContent = 'Copy';
+            copyBtn.style.position = 'absolute';
+            copyBtn.style.top = '0.5rem';
+            copyBtn.style.right = '0.5rem';
+            
+            copyBtn.addEventListener('click', () => {
+                navigator.clipboard.writeText(codeBlock.textContent).then(() => {
+                    copyBtn.textContent = 'Copied!';
+                    setTimeout(() => {
+                        copyBtn.textContent = 'Copy';
+                    }, 2000);
+                });
+            });
+            
+            pre.style.position = 'relative';
+            pre.appendChild(copyBtn);
+        });
+    }
+
     handleInlineToolExecution(response, currentAssistantMessage) {
-        // Handle inline tool execution like Cursor
+        console.log('Handling inline tool execution:', response);
+        
         if (!currentAssistantMessage) {
-            // Create assistant message if it doesn't exist
             currentAssistantMessage = this.addMessageToUI('assistant', '');
         }
         
-        const contentDiv = currentAssistantMessage.querySelector('.message-content');
-        if (!contentDiv) return;
-        
-        // Create or update tool execution indicator
-        let toolIndicator = currentAssistantMessage.querySelector('.tool-execution-indicator');
+        let toolIndicator = currentAssistantMessage.querySelector('.tool-indicator');
         
         if (response.status === 'executing') {
-            // Add tool execution indicator inline
             if (!toolIndicator) {
                 toolIndicator = document.createElement('div');
-                toolIndicator.className = 'tool-execution-indicator';
-                toolIndicator.style.cssText = `
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                    padding: 12px 16px;
-                    margin: 8px 0;
-                    background: linear-gradient(135deg, rgba(0, 122, 255, 0.08), rgba(0, 122, 255, 0.12));
-                    border: 1px solid rgba(0, 122, 255, 0.2);
-                    border-radius: 12px;
-                    font-size: 0.9em;
-                    color: rgba(224, 224, 224, 0.9);
-                    animation: fadeIn 0.3s ease;
-                    backdrop-filter: blur(10px);
-                    position: relative;
-                    overflow: hidden;
-                `;
+                toolIndicator.className = 'tool-indicator executing';
                 
-                // Add subtle animated background
-                const bgAnimation = document.createElement('div');
-                bgAnimation.style.cssText = `
-                    position: absolute;
-                    top: 0;
-                    left: -100%;
-                    width: 100%;
-                    height: 100%;
-                    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
-                    animation: shimmer 2s infinite;
-                `;
-                toolIndicator.appendChild(bgAnimation);
+                const icon = document.createElement('div');
+                icon.className = 'tool-icon executing';
+                icon.textContent = '⚙️';
                 
-                const spinner = document.createElement('div');
-                spinner.className = 'tool-spinner';
-                spinner.style.cssText = `
-                    width: 16px;
-                    height: 16px;
-                    border: 2px solid rgba(0, 122, 255, 0.3);
-                    border-top: 2px solid #007AFF;
-                    border-radius: 50%;
-                    animation: spin 1s linear infinite;
-                    flex-shrink: 0;
-                `;
-                
-                const text = document.createElement('span');
-                text.style.cssText = `
-                    font-weight: 500;
-                    z-index: 1;
-                    position: relative;
-                `;
+                const text = document.createElement('div');
+                text.className = 'tool-text';
                 text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'executing');
                 
-                toolIndicator.appendChild(spinner);
+                toolIndicator.appendChild(icon);
                 toolIndicator.appendChild(text);
                 currentAssistantMessage.appendChild(toolIndicator);
                 
-                // Add shimmer animation to styles if not already added
-                if (!document.querySelector('#shimmerStyle')) {
-                    const shimmerStyle = document.createElement('style');
-                    shimmerStyle.id = 'shimmerStyle';
-                    shimmerStyle.textContent = `
-                        @keyframes shimmer {
-                            0% { left: -100%; }
-                            100% { left: 100%; }
-                        }
-                        @keyframes spin {
-                            0% { transform: rotate(0deg); }
-                            100% { transform: rotate(360deg); }
-                        }
-                        @keyframes fadeIn {
-                            from { opacity: 0; transform: translateY(-5px); }
-                            to { opacity: 1; transform: translateY(0); }
-                        }
-                    `;
-                    document.head.appendChild(shimmerStyle);
-                }
+                this.scrollToBottom();
             }
         } else if (response.status === 'completed') {
-            // Update indicator to show completion
             if (toolIndicator) {
-                toolIndicator.style.background = 'linear-gradient(135deg, rgba(52, 199, 89, 0.08), rgba(52, 199, 89, 0.12))';
-                toolIndicator.style.borderColor = 'rgba(52, 199, 89, 0.3)';
+                toolIndicator.className = 'tool-indicator completed';
+                const icon = toolIndicator.querySelector('.tool-icon');
+                const text = toolIndicator.querySelector('.tool-text');
                 
-                const spinner = toolIndicator.querySelector('.tool-spinner');
-                if (spinner) {
-                    spinner.style.display = 'none';
+                if (icon) {
+                    icon.className = 'tool-icon completed';
+                    icon.textContent = '✅';
                 }
                 
-                const checkmark = document.createElement('div');
-                checkmark.innerHTML = '✓';
-                checkmark.style.cssText = `
-                    color: #34C759;
-                    font-weight: bold;
-                    font-size: 16px;
-                    width: 16px;
-                    height: 16px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    flex-shrink: 0;
-                    z-index: 1;
-                    position: relative;
-                `;
-                
-                if (spinner) {
-                    toolIndicator.replaceChild(checkmark, spinner);
-                }
-                
-                const text = toolIndicator.querySelector('span');
                 if (text) {
                     text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'completed');
                 }
                 
-                // Remove shimmer animation
-                const bgAnimation = toolIndicator.querySelector('div');
-                if (bgAnimation && bgAnimation.style.animation.includes('shimmer')) {
-                    bgAnimation.remove();
-                }
-                
-                // Auto-hide after 3 seconds with smooth fade
+                // Auto-hide after 3 seconds
                 setTimeout(() => {
                     if (toolIndicator && toolIndicator.parentNode) {
-                        toolIndicator.style.transition = 'all 0.5s ease';
                         toolIndicator.style.opacity = '0';
                         toolIndicator.style.transform = 'translateY(-10px)';
                         setTimeout(() => {
                             if (toolIndicator && toolIndicator.parentNode) {
                                 toolIndicator.remove();
                             }
-                        }, 500);
+                        }, 300);
                     }
                 }, 3000);
             }
         } else if (response.status === 'error') {
-            // Update indicator to show error
             if (toolIndicator) {
-                toolIndicator.style.background = 'linear-gradient(135deg, rgba(255, 59, 48, 0.08), rgba(255, 59, 48, 0.12))';
-                toolIndicator.style.borderColor = 'rgba(255, 59, 48, 0.3)';
+                toolIndicator.className = 'tool-indicator error';
+                const icon = toolIndicator.querySelector('.tool-icon');
+                const text = toolIndicator.querySelector('.tool-text');
                 
-                const spinner = toolIndicator.querySelector('.tool-spinner');
-                if (spinner) {
-                    spinner.style.display = 'none';
+                if (icon) {
+                    icon.className = 'tool-icon error';
+                    icon.textContent = '❌';
                 }
                 
-                const errorIcon = document.createElement('div');
-                errorIcon.innerHTML = '⚠';
-                errorIcon.style.cssText = `
-                    color: #FF3B30;
-                    font-weight: bold;
-                    font-size: 16px;
-                    width: 16px;
-                    height: 16px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    flex-shrink: 0;
-                    z-index: 1;
-                    position: relative;
-                `;
-                
-                if (spinner) {
-                    toolIndicator.replaceChild(errorIcon, spinner);
-                }
-                
-                const text = toolIndicator.querySelector('span');
                 if (text) {
                     text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'error', response.error);
                 }
-                
-                // Remove shimmer animation
-                const bgAnimation = toolIndicator.querySelector('div');
-                if (bgAnimation && bgAnimation.style.animation.includes('shimmer')) {
-                    bgAnimation.remove();
-                }
             }
         }
-        
-        this.scrollToBottom();
     }
 
     getToolDisplayMessage(tool, args, status, error = null) {
-        const toolMessages = {
-            'searchWeb': {
-                executing: `🔍 Searching for "${args.query}"...`,
-                completed: `✅ Found search results for "${args.query}"`,
-                error: `❌ Search failed: ${error || 'Unknown error'}`
-            },
-            'getPageContent': {
-                executing: `📄 Extracting content from search results...`,
-                completed: `✅ Content extracted successfully`,
-                error: `❌ Content extraction failed: ${error || 'Unknown error'}`
-            },
-            'openNewTab': {
-                executing: `🌐 Opening new tab...`,
-                completed: `✅ New tab opened`,
-                error: `❌ Failed to open tab: ${error || 'Unknown error'}`
-            },
-            'generateTool': {
-                executing: `🔧 Generating specialized tool...`,
-                completed: `✅ Tool generated successfully`,
-                error: `❌ Tool generation failed: ${error || 'Unknown error'}`
-            }
+        const toolNames = {
+            'get_active_tabs': 'Getting active tabs',
+            'extract_content': 'Extracting page content',
+            'search_web': 'Searching the web',
+            'take_screenshot': 'Taking screenshot'
         };
-        
-        return toolMessages[tool]?.[status] || `${status} ${tool}`;
+
+        const toolName = toolNames[tool] || tool;
+
+        switch (status) {
+            case 'executing':
+                return `${toolName}...`;
+            case 'completed':
+                return `${toolName} completed`;
+            case 'error':
+                return `${toolName} failed${error ? `: ${error}` : ''}`;
+            default:
+                return toolName;
+        }
     }
 
-    preprocessHtml() {
-        // Create a temporary div to work with the HTML
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = document.documentElement.innerHTML;
-
-        // Remove unnecessary elements
-        const elementsToRemove = [
-            'script', 'style', 'noscript', 'iframe', 'svg', 'canvas',
-            'link', 'meta', 'head', 'footer', 'nav', 'aside',
-            '[style*="display: none"]', '[style*="visibility: hidden"]',
-            '[aria-hidden="true"]', '[role="presentation"]'
-        ];
-
-        elementsToRemove.forEach(selector => {
-            const elements = tempDiv.querySelectorAll(selector);
-            elements.forEach(el => el.remove());
-        });
-
-        // Remove empty elements and comments
-        const removeEmptyElements = (element) => {
-            const children = Array.from(element.children);
-            children.forEach(child => {
-                // Remove empty elements (no text content and no non-empty children)
-                if (!child.textContent.trim() && !child.querySelector('img, video, input, button')) {
-                    child.remove();
-                } else {
-                    removeEmptyElements(child);
-                }
-            });
-        };
-
-        removeEmptyElements(tempDiv);
-
-        // Remove inline styles and classes
-        const removeAttributes = (element) => {
-            const children = Array.from(element.children);
-            children.forEach(child => {
-                child.removeAttribute('style');
-                child.removeAttribute('class');
-                child.removeAttribute('id');
-                removeAttributes(child);
-            });
-        };
-
-        removeAttributes(tempDiv);
-
-        // Get only the main content
-        let mainContent = '';
-        const mainSelectors = ['main', 'article', '[role="main"]', '#content', '.content', '#main', '.main'];
-        
-        for (const selector of mainSelectors) {
-            const element = tempDiv.querySelector(selector);
-            if (element) {
-                mainContent = element.textContent.trim();
-                break;
-            }
-        }
-
-        // If no main content found, get body content
-        if (!mainContent) {
-            mainContent = tempDiv.textContent.trim();
-        }
-
-        // Clean up the text content
-        return mainContent
-            .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
-            .replace(/\n+/g, '\n') // Replace multiple newlines with single newline
-            .trim()
-            .substring(0, 50000);  // Limit content length
-    }
-
-    // Add this method to remove streaming indicator when done
     removeStreamingIndicator() {
-        if (this.currentMessage) {
-            const indicator = this.currentMessage.querySelector('.streaming-indicator');
-            if (indicator) {
-                indicator.remove();
-            }
+        const indicator = this.messagesContainer.querySelector('.streaming-indicator');
+        if (indicator) {
+            indicator.remove();
         }
     }
 
     addMessageToUI(role, content, isError = false) {
         const messageDiv = document.createElement('div');
-        messageDiv.className = `message ${role}-message${isError ? ' error' : ''}`;
+        messageDiv.className = `message ${role}${isError ? ' error' : ''}`;
         
-        // Create message content container
+        const bubbleDiv = document.createElement('div');
+        bubbleDiv.className = 'message-bubble';
+        
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         
-        // Handle different types of content with markdown formatting
-        if (typeof content === 'object') {
-            contentDiv.textContent = JSON.stringify(content, null, 2);
-        } else {
-            // Basic markdown-like formatting for better readability
-            let formattedText = content;
-            
-            // Convert **bold** to HTML
-            formattedText = formattedText.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            
-            // Convert ### headers to HTML
-            formattedText = formattedText.replace(/^### (.*$)/gm, '<h3 style="margin: 16px 0 8px 0; color: #e0e0e0; font-size: 1.1em; font-weight: 600;">$1</h3>');
-            
-            // Convert bullet points to HTML
-            formattedText = formattedText.replace(/^- (.*$)/gm, '<div style="margin: 4px 0; padding-left: 16px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF;">•</span>$1</div>');
-            
-            // Convert numbered lists to HTML
-            formattedText = formattedText.replace(/^(\d+)\. (.*$)/gm, '<div style="margin: 4px 0; padding-left: 20px; position: relative;"><span style="position: absolute; left: 0; color: #007AFF; font-weight: 600;">$1.</span>$2</div>');
-            
-            // Convert URLs to clickable links
-            formattedText = formattedText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" style="color: #007AFF; text-decoration: none; border-bottom: 1px solid rgba(0, 122, 255, 0.3);">$1</a>');
-            
-            // Preserve line breaks
-            formattedText = formattedText.replace(/\n/g, '<br>');
-            
-            contentDiv.innerHTML = formattedText;
+        if (content) {
+            if (typeof marked !== 'undefined' && role === 'assistant') {
+                contentDiv.innerHTML = marked.parse(content);
+                if (typeof Prism !== 'undefined') {
+                    Prism.highlightAllUnder(contentDiv);
+                }
+                this.addCopyButtonsToCodeBlocks(contentDiv);
+            } else {
+                contentDiv.textContent = content;
+            }
         }
         
-        messageDiv.appendChild(contentDiv);
-        
-        // Add timestamp
-        const timestamp = document.createElement('div');
-        timestamp.className = 'message-timestamp';
-        timestamp.textContent = new Date().toLocaleTimeString();
-        timestamp.style.cssText = 'font-size: 0.75em; opacity: 0.6; margin-top: 8px; text-align: right;';
-        messageDiv.appendChild(timestamp);
-        
+        bubbleDiv.appendChild(contentDiv);
+        messageDiv.appendChild(bubbleDiv);
         this.messagesContainer.appendChild(messageDiv);
+        
         this.scrollToBottom();
         return messageDiv;
     }
 
     scrollToBottom() {
-        requestAnimationFrame(() => {
-            this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
-        });
+        this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
     }
 
     addMessageToThread(role, content, isError = false) {
@@ -983,288 +831,397 @@ class ChatUI {
                 role,
                 content,
                 isError,
-                timestamp: Date.now()
+                timestamp: new Date().toISOString()
             });
             this.saveThreads();
         }
     }
 
     clearMessages() {
-        while (this.messagesContainer.firstChild) {
-            this.messagesContainer.removeChild(this.messagesContainer.firstChild);
+        this.messagesContainer.innerHTML = '';
+        const thread = this.threads.get(this.currentThread);
+        if (thread) {
+            thread.messages = [];
+            this.saveThreads();
         }
     }
 
     showTypingIndicator() {
-        const indicator = document.createElement('div');
-        indicator.className = 'typing-indicator';
-        indicator.id = 'typingIndicator';
+        this.hideTypingIndicator(); // Remove any existing indicator
         
-        const dots = document.createElement('div');
-        dots.className = 'typing-dots';
+        const typingDiv = document.createElement('div');
+        typingDiv.className = 'typing-indicator';
+        
+        const dotsDiv = document.createElement('div');
+        dotsDiv.className = 'typing-dots';
+        
         for (let i = 0; i < 3; i++) {
             const dot = document.createElement('div');
             dot.className = 'typing-dot';
-            dots.appendChild(dot);
+            dotsDiv.appendChild(dot);
         }
-        indicator.appendChild(dots);
         
-        this.messagesContainer.appendChild(indicator);
+        const textSpan = document.createElement('span');
+        textSpan.textContent = 'AI is thinking...';
+        
+        typingDiv.appendChild(dotsDiv);
+        typingDiv.appendChild(textSpan);
+        this.messagesContainer.appendChild(typingDiv);
+        
         this.scrollToBottom();
     }
 
     hideTypingIndicator() {
-        const indicator = document.getElementById('typingIndicator');
+        const indicator = this.messagesContainer.querySelector('.typing-indicator');
         if (indicator) {
             indicator.remove();
         }
     }
 
     openSettings() {
-        chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS' });
+        chrome.runtime.openOptionsPage();
     }
 
-    showNotification(message) {
-        // Remove any existing notification
-        const existingNotification = document.querySelector('.notification');
-        if (existingNotification) {
-            existingNotification.remove();
-        }
-
+    showNotification(message, type = 'info') {
         const notification = document.createElement('div');
-        notification.className = 'notification';
+        notification.className = `notification ${type}`;
         notification.textContent = message;
+        
         document.body.appendChild(notification);
-
-        // Remove notification after 3 seconds with animation
+        
         setTimeout(() => {
-            notification.style.animation = 'slideOut 0.3s ease forwards';
-            setTimeout(() => notification.remove(), 300);
+            notification.style.animation = 'slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1) reverse';
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.remove();
+                }
+            }, 300);
         }, 3000);
     }
 
-    sendMessageToBackground(message, onStream = null) {
+    async sendMessageToBackground(message, onStream = null) {
         return new Promise((resolve, reject) => {
-            if (onStream) {
-                // For streaming, we'll use a long-lived connection
+            this.currentMessage = null;
+            this.currentContent = '';
+            let isCompleted = false;
+            let timeoutId = null;
+            
+            // Set a timeout to prevent hanging
+            timeoutId = setTimeout(() => {
+                if (!isCompleted) {
+                    console.warn('Message processing timeout, forcing completion');
+                    this.hideTypingIndicator();
+                    
+                    if (this.currentContent && this.currentContent.trim()) {
+                        this.addMessageToThread('assistant', this.currentContent);
+                        this.updateThreadPreview();
+                    } else {
+                        // Add a timeout message if no content was received
+                        const timeoutMessage = "I apologize, but the request timed out. Please try again.";
+                        this.addMessageToThread('assistant', timeoutMessage, true);
+                        this.addMessageToUI('assistant', timeoutMessage, true);
+                    }
+                    
+                    isCompleted = true;
+                    resolve();
+                }
+            }, 60000); // 60 second timeout
+            
+            const completeResponse = () => {
+                if (isCompleted) return;
+                
+                isCompleted = true;
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                }
+                
+                console.log('Completing response');
+                this.hideTypingIndicator();
+                
+                if (this.currentContent && this.currentContent.trim()) {
+                    console.log('Saving final content to thread:', this.currentContent.length, 'characters');
+                    this.addMessageToThread('assistant', this.currentContent);
+                    this.updateThreadPreview();
+                }
+                
+                this.currentMessage = null;
+                this.currentContent = '';
+                resolve();
+            };
+            
+            try {
+                // Create port connection for streaming
                 const port = chrome.runtime.connect({ name: 'chat' });
                 
+                // Handle streaming messages
                 port.onMessage.addListener((response) => {
+                    console.log('Received port message:', response);
+                    
                     if (response.error) {
-                        port.disconnect();
-                        reject(new Error(response.error));
+                        console.error('Received error from background:', response.error);
+                        if (!isCompleted) {
+                            isCompleted = true;
+                            if (timeoutId) clearTimeout(timeoutId);
+                            this.hideTypingIndicator();
+                            reject(new Error(response.error));
+                        }
                         return;
                     }
-                    
-                    // Log the response for debugging
-                    console.log('Streaming response:', response);
-                    
-                    onStream(response);
-                    
-                    if (response.done) {
+
+                    // Handle different response types
+                    if (response.type === 'delta' && response.content) {
+                        if (onStream) {
+                            onStream(response.content);
+                        }
+                    } else if (response.type === 'stream' && response.content) {
+                        if (onStream) {
+                            onStream(response.content);
+                        }
+                    } else if (response.type === 'complete' || response.done) {
+                        console.log('Stream completed, finalizing response');
                         port.disconnect();
-                        resolve();
+                        completeResponse();
+                    } else if (response.type === 'tool_execution_inline') {
+                        console.log('Handling tool execution:', response.tool, response.status);
+                        // Handle inline tool execution updates
+                        this.handleInlineToolExecution(response, this.currentMessage);
+                    } else if (response.choices && response.choices[0] && response.choices[0].delta && response.choices[0].delta.content) {
+                        // Handle Azure OpenAI format
+                        if (onStream) {
+                            onStream(response.choices[0].delta.content);
+                        }
+                    } else {
+                        console.log('Unhandled response type:', response);
                     }
                 });
 
+                // Handle port disconnection
                 port.onDisconnect.addListener(() => {
+                    console.log('Port disconnected');
                     if (chrome.runtime.lastError) {
                         console.error('Port disconnected with error:', chrome.runtime.lastError);
-                        reject(new Error(chrome.runtime.lastError.message));
+                        if (!isCompleted) {
+                            isCompleted = true;
+                            if (timeoutId) clearTimeout(timeoutId);
+                            this.hideTypingIndicator();
+                            reject(new Error(chrome.runtime.lastError.message));
+                        }
+                    } else {
+                        // Normal disconnection - ensure we complete properly
+                        console.log('Normal port disconnection, completing response');
+                        completeResponse();
                     }
                 });
 
-                port.postMessage(message);
-            } else {
-                // For non-streaming messages, use the regular message passing
-                chrome.runtime.sendMessage(message, response => {
-                    if (chrome.runtime.lastError) {
-                        reject(chrome.runtime.lastError);
-                    } else {
-                        resolve(response);
-                    }
+                // Send message using the format expected by background script
+                console.log('Sending message to background:', {
+                    type: 'PROCESS_MESSAGE',
+                    message: message,
+                    modelId: this.modelSelector.value
                 });
+                
+                port.postMessage({
+                    type: 'PROCESS_MESSAGE',
+                    message: message,
+                    modelId: this.modelSelector.value,
+                    pageContent: '',  // Chat UI doesn't have page content
+                    pageUrl: window.location.href,
+                    pageTitle: document.title
+                });
+
+            } catch (error) {
+                console.error('Error in sendMessageToBackground:', error);
+                if (!isCompleted) {
+                    isCompleted = true;
+                    if (timeoutId) clearTimeout(timeoutId);
+                    this.hideTypingIndicator();
+                    reject(error);
+                }
             }
         });
     }
 
     showPrivacyInfo() {
-        // Add privacy information message at the start
-        const privacyDiv = document.createElement('div');
-        privacyDiv.className = 'privacy-info';
-        privacyDiv.innerHTML = `
-            <div class="info-icon">ℹ️</div>
-            <div class="info-text">
-                <strong>Privacy Notice:</strong> For your privacy, this extension only accesses 
-                basic information about your open tabs (URLs and titles), not their content.
-            </div>
-        `;
-        
-        const style = document.createElement('style');
-        style.textContent = `
-            .privacy-info {
-                background-color: #e3f2fd;
-                border-radius: 8px;
-                padding: 10px 15px;
-                margin: 10px 0;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                font-size: 0.9em;
-                color: #0d47a1;
-            }
-            .info-icon {
-                font-size: 1.5em;
-            }
-        `;
-        document.head.appendChild(style);
-        
-        // Add to the messages container as the first item
-        if (this.messagesContainer.firstChild) {
-            this.messagesContainer.insertBefore(privacyDiv, this.messagesContainer.firstChild);
-        } else {
-            this.messagesContainer.appendChild(privacyDiv);
+        const hasShownPrivacy = localStorage.getItem('hasShownPrivacyInfo');
+        if (!hasShownPrivacy) {
+            setTimeout(() => {
+                this.showNotification('Your conversations are private and stored locally. No data is sent to external servers except for AI processing.', 'info');
+                localStorage.setItem('hasShownPrivacyInfo', 'true');
+            }, 2000);
         }
     }
 
     updateStatus(type, text) {
-        this.statusDot.className = `status-dot ${type}`;
         this.statusText.textContent = text;
+        this.statusDot.className = `status-dot ${type}`;
     }
 
     toggleFullscreen() {
-        try {
-            if (document.fullscreenElement) {
-                // Exit fullscreen
-                document.exitFullscreen().then(() => {
-                    this.fullscreenButton.textContent = '🖥️';
-                    this.fullscreenButton.title = 'Enter Fullscreen';
-                    this.log(this.logLevels.INFO, 'Exited fullscreen mode');
-                }).catch((error) => {
-                    console.error('Error exiting fullscreen:', error);
-                    this.log(this.logLevels.ERROR, 'Failed to exit fullscreen', error);
-                });
-            } else {
-                // Enter fullscreen
-                document.documentElement.requestFullscreen().then(() => {
-                    this.fullscreenButton.textContent = '🗗';
-                    this.fullscreenButton.title = 'Exit Fullscreen';
-                    this.log(this.logLevels.INFO, 'Entered fullscreen mode');
-                }).catch((error) => {
-                    console.error('Error entering fullscreen:', error);
-                    this.log(this.logLevels.ERROR, 'Failed to enter fullscreen', error);
-                    this.showNotification('Fullscreen not supported or blocked');
-                });
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else {
+            document.documentElement.requestFullscreen();
+        }
+    }
+
+    showConfigurationHelp() {
+        // Clear messages and show help
+        this.messagesContainer.innerHTML = '';
+        
+        const helpDiv = document.createElement('div');
+        helpDiv.className = 'configuration-help';
+        helpDiv.innerHTML = `
+            <div class="help-content">
+                <h2>🚀 Welcome to XatBrowser AI!</h2>
+                <p>To get started, you need to configure your AI models:</p>
+                
+                <div class="help-steps">
+                    <div class="help-step">
+                        <div class="step-number">1</div>
+                        <div class="step-content">
+                            <h3>Open Settings</h3>
+                            <p>Click the settings button (⚙️) in the header above</p>
+                        </div>
+                    </div>
+                    
+                    <div class="help-step">
+                        <div class="step-number">2</div>
+                        <div class="step-content">
+                            <h3>Add Your API Keys</h3>
+                            <p>Configure Azure OpenAI or Claude AI with your API credentials</p>
+                        </div>
+                    </div>
+                    
+                    <div class="help-step">
+                        <div class="step-number">3</div>
+                        <div class="step-content">
+                            <h3>Start Chatting</h3>
+                            <p>Return here and select a model to begin your AI conversation</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="help-settings-btn" onclick="window.chatUI.openSettings()">
+                    ⚙️ Open Settings Now
+                </button>
+            </div>
+        `;
+        
+        this.messagesContainer.appendChild(helpDiv);
+        
+        // Add styles for the help content
+        if (!document.getElementById('help-styles')) {
+            const style = document.createElement('style');
+            style.id = 'help-styles';
+            style.textContent = `
+                .configuration-help {
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100%;
+                    padding: 2rem;
+                }
+                
+                .help-content {
+                    max-width: 500px;
+                    text-align: center;
+                    background: var(--bg-card);
+                    padding: 2rem;
+                    border-radius: 16px;
+                    border: 1px solid var(--border);
+                    box-shadow: 0 8px 24px var(--shadow-lg);
+                }
+                
+                .help-content h2 {
+                    color: var(--primary);
+                    margin-bottom: 1rem;
+                    font-size: 1.5rem;
+                }
+                
+                .help-content p {
+                    color: var(--text-secondary);
+                    margin-bottom: 1.5rem;
+                    line-height: 1.6;
+                }
+                
+                .help-steps {
+                    text-align: left;
+                    margin: 2rem 0;
+                }
+                
+                .help-step {
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 1rem;
+                    margin-bottom: 1.5rem;
+                }
+                
+                .step-number {
+                    width: 32px;
+                    height: 32px;
+                    background: linear-gradient(135deg, var(--primary), var(--secondary));
+                    color: white;
+                    border-radius: 50%;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-weight: 600;
+                    flex-shrink: 0;
+                }
+                
+                .step-content h3 {
+                    color: var(--text-primary);
+                    margin-bottom: 0.5rem;
+                    font-size: 1rem;
+                }
+                
+                .step-content p {
+                    color: var(--text-secondary);
+                    margin: 0;
+                    font-size: 0.875rem;
+                }
+                
+                .help-settings-btn {
+                    background: linear-gradient(135deg, var(--primary), var(--primary-hover));
+                    color: white;
+                    border: none;
+                    padding: 0.75rem 1.5rem;
+                    border-radius: 12px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    font-size: 1rem;
+                    box-shadow: 0 4px 12px var(--shadow);
+                }
+                
+                .help-settings-btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 8px 24px var(--shadow-lg);
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    }
+
+    updateThreadPreview() {
+        const thread = this.threads.get(this.currentThread);
+        if (thread && thread.messages.length > 0) {
+            const lastMessage = thread.messages[thread.messages.length - 1];
+            if (lastMessage.role === 'user') {
+                thread.preview = lastMessage.content.length > 50 ? 
+                    lastMessage.content.substring(0, 50) + '...' : 
+                    lastMessage.content;
             }
-        } catch (error) {
-            console.error('Fullscreen API error:', error);
-            this.log(this.logLevels.ERROR, 'Fullscreen API not supported', error);
-            this.showNotification('Fullscreen not supported in this browser');
+            
+            const chatItem = document.querySelector(`[data-chat-id="${this.currentThread}"] .chat-preview`);
+            if (chatItem) {
+                chatItem.textContent = thread.preview;
+            }
         }
     }
 }
 
-// Add CSS styles
-const style = document.createElement('style');
-style.textContent = `
-    .message {
-        margin: 8px 0;
-        padding: 12px;
-        border-radius: 8px;
-        max-width: 85%;
-        word-wrap: break-word;
-        position: relative;
-    }
-
-    .user-message {
-        background-color: #e3f2fd;
-        margin-left: auto;
-        color: #1565c0;
-    }
-
-    .assistant-message {
-        background-color: #f5f5f5;
-        margin-right: auto;
-        color: #333;
-    }
-
-    .message.error {
-        background-color: #ffebee;
-        color: #c62828;
-    }
-
-    .message-content {
-        margin-bottom: 4px;
-    }
-
-    .message-timestamp {
-        font-size: 0.75em;
-        color: #666;
-        text-align: right;
-    }
-
-    .typing-indicator {
-        padding: 12px;
-        margin: 8px 0;
-        background-color: #f5f5f5;
-        border-radius: 8px;
-        display: inline-block;
-    }
-
-    .typing-dots {
-        display: flex;
-        gap: 4px;
-    }
-
-    .typing-dot {
-        width: 8px;
-        height: 8px;
-        background-color: #666;
-        border-radius: 50%;
-        animation: typing 1s infinite ease-in-out;
-    }
-
-    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
-    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
-
-    @keyframes typing {
-        0%, 100% { transform: translateY(0); }
-        50% { transform: translateY(-4px); }
-    }
-
-    #messages {
-        display: flex;
-        flex-direction: column;
-        padding: 16px;
-        overflow-y: auto;
-        height: calc(100vh - 200px);
-    }
-
-    .notification {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        background-color: #333;
-        color: white;
-        padding: 12px 24px;
-        border-radius: 4px;
-        animation: slideIn 0.3s ease;
-        z-index: 1000;
-    }
-
-    @keyframes slideIn {
-        from { transform: translateY(100%); opacity: 0; }
-        to { transform: translateY(0); opacity: 1; }
-    }
-
-    @keyframes slideOut {
-        from { transform: translateY(0); opacity: 1; }
-        to { transform: translateY(100%); opacity: 0; }
-    }
-`;
-document.head.appendChild(style);
-
-// Initialize the chat UI when the document is loaded
+// Initialize the chat UI when the page loads
 document.addEventListener('DOMContentLoaded', () => {
-    window.chatUI = new ChatUI();
+    window.chatUI = new ModernChatUI();
 }); 
