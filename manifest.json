@@ -10,7 +10,8 @@
     "notifications",
     "activeTab",
     "webNavigation",
-    "contextMenus"
+    "contextMenus",
+    "tabCapture"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -45,7 +46,8 @@
         "sidebar.js",
         "config/*",
         "settings.html",
-        "settings.js"
+        "settings.js",
+        "libs/*"
       ],
       "matches": ["<all_urls>"]
     }

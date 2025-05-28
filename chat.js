@@ -44,43 +44,70 @@ class ModernChatUI {
     }
 
     initializeElements() {
-        // Main elements
+        // Get references to existing HTML elements
         this.modelSelector = document.getElementById('modelSelector');
-        this.settingsBtn = document.getElementById('settingsBtn');
-        this.fullscreenBtn = document.getElementById('fullscreenBtn');
-        this.logToggleBtn = document.getElementById('logToggleBtn');
-        this.statusDot = document.getElementById('statusDot');
-        this.statusText = document.getElementById('statusText');
-        this.messageInput = document.getElementById('messageInput');
-        this.sendBtn = document.getElementById('sendBtn');
         this.messagesContainer = document.getElementById('messagesContainer');
-
-        // New elements
-        this.chatList = document.getElementById('chatList');
-        this.newChatBtn = document.getElementById('newChatBtn');
-        this.logContent = document.getElementById('logContent');
-        this.logToggle = document.getElementById('logToggle');
-        this.logPanel = document.getElementById('logPanel');
+        this.messageInput = document.getElementById('messageInput');
+        this.sendButton = document.getElementById('sendBtn');
+        this.settingsButton = document.getElementById('settingsBtn');
+        this.newThreadButton = document.getElementById('newChatBtn');
+        this.threadList = document.getElementById('chatList');
+        this.statusText = document.getElementById('statusText');
+        this.statusDot = document.getElementById('statusDot');
         this.themeSelector = document.getElementById('themeSelector');
-        this.sidebar = document.getElementById('sidebar');
+        this.fullscreenButton = document.getElementById('fullscreenBtn');
+        this.logToggleButton = document.getElementById('logToggleBtn');
+        this.logPanel = document.getElementById('logPanel');
+        this.logContent = document.getElementById('logContent');
 
-        // Enable send button if model is selected
-        this.handleModelChange();
+        // Verify all elements exist
+        const requiredElements = [
+            'modelSelector', 'messagesContainer', 'messageInput', 'sendButton', 
+            'settingsButton', 'newThreadButton', 'threadList', 'statusText', 'statusDot'
+        ];
+
+        for (const elementName of requiredElements) {
+            if (!this[elementName]) {
+                console.error(`Required element not found: ${elementName}`);
+                this.log(this.logLevels.ERROR, `Required element not found: ${elementName}`);
+            }
+        }
+
+        // Set initial state
+        if (this.sendButton) {
+            this.sendButton.disabled = true;
+        }
+        
+        if (this.statusText) {
+            this.statusText.textContent = 'Select a model to begin';
+        }
+        
+        if (this.statusDot) {
+            this.statusDot.className = 'status-dot offline';
+        }
     }
 
     initializeEventListeners() {
         // Model and settings
         this.modelSelector.addEventListener('change', () => this.handleModelChange());
-        this.settingsBtn.addEventListener('click', () => this.openSettings());
-        this.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
-        this.logToggleBtn.addEventListener('click', () => this.toggleLogPanel());
-        this.themeSelector.addEventListener('change', (e) => this.changeTheme(e.target.value));
+        this.settingsButton.addEventListener('click', () => this.openSettings());
+        this.newThreadButton.addEventListener('click', () => this.createNewThread());
+
+        // Theme selector
+        if (this.themeSelector) {
+            this.themeSelector.addEventListener('change', (e) => this.changeTheme(e.target.value));
+        }
+
+        // Fullscreen button
+        if (this.fullscreenButton) {
+            this.fullscreenButton.addEventListener('click', () => this.toggleFullscreen());
+        }
 
         // Input handling
         this.messageInput.addEventListener('input', () => this.handleInputChange());
         this.messageInput.addEventListener('keydown', (e) => this.handleKeyPress(e));
-        this.sendBtn.addEventListener('click', () => {
-            if (!this.sendBtn.disabled) {
+        this.sendButton.addEventListener('click', () => {
+            if (!this.sendButton.disabled) {
                 this.handleSendMessage();
             }
         });
@@ -88,13 +115,11 @@ class ModernChatUI {
         // Auto-resize textarea
         this.messageInput.addEventListener('input', () => {
             this.messageInput.style.height = 'auto';
-            this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 150) + 'px';
+            this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 120) + 'px';
         });
 
         // Chat management
-        this.newChatBtn.addEventListener('click', () => this.createNewThread());
-        this.logToggle.addEventListener('click', () => this.toggleLogPanel());
-        this.chatList.addEventListener('click', (e) => {
+        this.threadList.addEventListener('click', (e) => {
             const chatItem = e.target.closest('.chat-item');
             if (chatItem) {
                 this.switchThread(chatItem.dataset.chatId);
@@ -111,20 +136,18 @@ class ModernChatUI {
                 e.preventDefault();
                 this.createNewThread();
             }
-            if (e.ctrlKey && e.key === 'l') {
-                e.preventDefault();
-                this.toggleLogPanel();
-            }
         });
 
         // Fullscreen change detection
         document.addEventListener('fullscreenchange', () => {
-            if (document.fullscreenElement) {
-                this.fullscreenBtn.textContent = '🗗';
-                this.fullscreenBtn.title = 'Exit Fullscreen';
-            } else {
-                this.fullscreenBtn.textContent = '🖥️';
-                this.fullscreenBtn.title = 'Enter Fullscreen';
+            if (this.fullscreenButton) {
+                if (document.fullscreenElement) {
+                    this.fullscreenButton.textContent = '🗗';
+                    this.fullscreenButton.title = 'Exit Fullscreen';
+                } else {
+                    this.fullscreenButton.textContent = '🖥️';
+                    this.fullscreenButton.title = 'Enter Fullscreen';
+                }
             }
         });
     }
@@ -141,7 +164,9 @@ class ModernChatUI {
 
     initializeTheme() {
         const savedTheme = localStorage.getItem('chatTheme') || 'dark';
-        this.themeSelector.value = savedTheme;
+        if (this.themeSelector) {
+            this.themeSelector.value = savedTheme;
+        }
         this.changeTheme(savedTheme);
     }
 
@@ -207,15 +232,8 @@ class ModernChatUI {
             entryElement.appendChild(dataElement);
         }
 
-        this.logContent.appendChild(entryElement);
-        this.logContent.scrollTop = this.logContent.scrollHeight;
-    }
-
-    toggleLogPanel() {
-        this.logPanel.classList.toggle('collapsed');
-        const isCollapsed = this.logPanel.classList.contains('collapsed');
-        this.logToggle.textContent = isCollapsed ? '▲' : '▼';
-        this.logToggleBtn.style.opacity = isCollapsed ? '0.6' : '1';
+        this.messagesContainer.appendChild(entryElement);
+        this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
     }
 
     createNewThread() {
@@ -249,7 +267,7 @@ class ModernChatUI {
         chatItem.appendChild(titleDiv);
         chatItem.appendChild(previewDiv);
         
-        this.chatList.appendChild(chatItem);
+        this.threadList.appendChild(chatItem);
     }
 
     switchThread(threadId) {
@@ -398,75 +416,424 @@ class ModernChatUI {
     }
 
     handleModelChange() {
+        const selectedOption = this.modelSelector.options[this.modelSelector.selectedIndex];
+        const modelName = selectedOption ? selectedOption.text : "undefined";
+        
         const hasModel = this.modelSelector.value !== '';
         const hasText = this.messageInput.value.trim().length > 0;
         
-        this.sendBtn.disabled = !hasText || !hasModel;
+        this.sendButton.disabled = !hasText || !hasModel;
         
         if (hasModel) {
             localStorage.setItem('selectedModel', this.modelSelector.value);
-            this.updateStatus('connected', `Connected to ${this.modelSelector.value.split(':')[1]}`);
+            this.updateStatus('connected', `Connected to ${modelName}`);
         } else {
             this.updateStatus('', 'Select a model to begin');
         }
     }
 
     handleInputChange() {
-        const hasText = this.messageInput.value.trim().length > 0;
-        const hasModel = this.modelSelector.value !== '';
-        this.sendBtn.disabled = !hasText || !hasModel;
+        // Auto-resize textarea
+        this.messageInput.style.height = 'auto';
+        this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 120) + 'px';
+        
+        // Update send button state
+        this.sendButton.disabled = !this.messageInput.value.trim() || !this.modelSelector.value || this.isProcessing;
     }
 
     handleKeyPress(e) {
-        if (e.key === 'Enter' && !e.shiftKey && !this.sendBtn.disabled) {
+        if (e.key === 'Enter' && !e.shiftKey && !this.sendButton.disabled) {
             e.preventDefault();
             this.handleSendMessage();
         }
     }
 
     async handleSendMessage() {
-        const message = this.messageInput.value.trim();
-        if (!message || !this.modelSelector.value) {
+        const userInput = this.messageInput.value.trim();
+        if (!userInput || !this.modelSelector.value || this.isProcessing) {
             return;
         }
 
-        // Add user message to UI and thread
-        this.addMessageToThread('user', message);
-        this.addMessageToUI('user', message);
-        
-        // Clear input and show typing indicator
-        this.messageInput.value = '';
-        this.handleInputChange();
-        this.showTypingIndicator();
+        this.isProcessing = true;
         this.setUIState(false);
 
-        try {
-            // Create assistant message container
-            this.currentMessage = this.addMessageToUI('assistant', '');
-            this.currentContent = '';
+        // Add user message to UI and thread
+        this.addMessageToUI('user', userInput);
+        this.addMessageToThread('user', userInput);
 
-            // Send message using streaming
-            await this.sendMessageToBackground(message, (content) => {
-                this.handleStreamingContent(content);
+        // Clear input
+        this.messageInput.value = '';
+        this.handleInputChange();
+
+        // Create assistant message container
+        const assistantMessageDiv = this.addMessageToUI('assistant', '');
+        let fullResponse = '';
+        let currentThinkingContainer = null;
+        let thinkingSteps = new Map(); // Track thinking steps
+
+        try {
+            // Create streaming connection with better error handling
+            let port;
+            try {
+                port = chrome.runtime.connect({ name: 'chat' });
+            } catch (connectionError) {
+                console.error('Failed to create port connection:', connectionError);
+                const messageContent = assistantMessageDiv.querySelector('.message-content');
+                if (messageContent) {
+                    messageContent.innerHTML = '<div class="error-message">Error: Could not connect to AI service. Please refresh the page and try again.</div>';
+                }
+                assistantMessageDiv.classList.add('error');
+                this.setUIState(true);
+                this.isProcessing = false;
+                return;
+            }
+
+            let hasReceivedContent = false;
+            let processingTimeout;
+            let isPortConnected = true;
+
+            // Set up timeout for processing
+            const startProcessingTimeout = () => {
+                processingTimeout = setTimeout(() => {
+                    console.warn('Processing timeout - no content received');
+                    if (!hasReceivedContent && isPortConnected) {
+                        const messageContent = assistantMessageDiv.querySelector('.message-content');
+                        if (messageContent) {
+                            messageContent.innerHTML = '<em>Request timed out. Please try again.</em>';
+                        }
+                        this.setUIState(true);
+                        this.isProcessing = false;
+                        if (port) {
+                            try {
+                                port.disconnect();
+                            } catch (e) {
+                                console.warn('Error disconnecting port on timeout:', e);
+                            }
+                        }
+                    }
+                }, 30000); // 30 second timeout
+            };
+
+            startProcessingTimeout();
+
+            port.onMessage.addListener((response) => {
+                try {
+                    // Clear timeout on any response
+                    if (processingTimeout) {
+                        clearTimeout(processingTimeout);
+                        processingTimeout = null;
+                    }
+
+                    if (!isPortConnected) {
+                        console.warn("Port already disconnected, ignoring response:", response);
+                        return;
+                    }
+
+                    if (response.error) {
+                        console.error('Received error:', response.error);
+                        const messageContent = assistantMessageDiv.querySelector('.message-content');
+                        if (messageContent) {
+                            messageContent.innerHTML = `<div class="error-message">Error: ${this.escapeHtml(response.error)}</div>`;
+                        }
+                        assistantMessageDiv.classList.add('error');
+                        this.disconnectPort(port);
+                        isPortConnected = false;
+                        this.setUIState(true);
+                        this.isProcessing = false;
+                        return;
+                    }
+
+                    // Handle thinking steps
+                    if (response.type === 'thinking_step') {
+                        hasReceivedContent = true;
+                        this.handleThinkingStep(response, assistantMessageDiv);
+                        return;
+                    }
+
+                    // Handle tool execution
+                    if (response.type === 'tool_execution_inline') {
+                        hasReceivedContent = true;
+                        this.handleInlineToolExecution(response, assistantMessageDiv);
+                        return;
+                    }
+
+                    // Handle regular content
+                    if (response.type === 'delta' && response.content) {
+                        hasReceivedContent = true;
+                        fullResponse += response.content;
+                        
+                        const messageContent = assistantMessageDiv.querySelector('.message-content');
+                        if (messageContent) {
+                            // Update the final response section
+                            let finalResponseDiv = messageContent.querySelector('.final-response');
+                            if (!finalResponseDiv) {
+                                finalResponseDiv = document.createElement('div');
+                                finalResponseDiv.className = 'final-response';
+                                messageContent.appendChild(finalResponseDiv);
+                            }
+                            finalResponseDiv.innerHTML = this.parseBasicMarkdown(fullResponse);
+                            this.addCopyButtonsToCodeBlocks(finalResponseDiv);
+                        }
+                        
+                        this.scrollToBottom();
+                    }
+
+                    if (response.done) {
+                        console.log('Stream completed');
+                        
+                        // Ensure we have some content
+                        if (!hasReceivedContent || !fullResponse.trim()) {
+                            const messageContent = assistantMessageDiv.querySelector('.message-content');
+                            if (messageContent && !messageContent.querySelector('.thinking-container') && !messageContent.querySelector('.tool-execution')) {
+                                messageContent.innerHTML = '<em>No response received. Please try again.</em>';
+                            }
+                        }
+                        
+                        // Add final response to thread
+                        if (fullResponse.trim()) {
+                            this.addMessageToThread('assistant', fullResponse);
+                        }
+                        
+                        this.disconnectPort(port);
+                        isPortConnected = false;
+                        this.setUIState(true);
+                        this.isProcessing = false;
+                        this.updateThreadPreview();
+                    }
+                } catch (error) {
+                    console.error('Error handling port message:', error);
+                    const messageContent = assistantMessageDiv.querySelector('.message-content');
+                    if (messageContent) {
+                        messageContent.innerHTML = `<div class="error-message">Error: ${this.escapeHtml(error.message)}</div>`;
+                    }
+                    assistantMessageDiv.classList.add('error');
+                    this.setUIState(true);
+                    this.isProcessing = false;
+                }
             });
 
+            port.onDisconnect.addListener(() => {
+                isPortConnected = false;
+                
+                if (processingTimeout) {
+                    clearTimeout(processingTimeout);
+                }
+                
+                if (chrome.runtime.lastError) {
+                    console.error('Port disconnected with error:', chrome.runtime.lastError.message);
+                    if (chrome.runtime.lastError.message.includes("Extension context invalidated")) {
+                        // Handle context invalidation more gracefully
+                        this.log(this.logLevels.ERROR, "Extension context invalidated. Chat features disabled until refresh.");
+                        this.updateStatus('error', "Extension updated. Please refresh page.");
+                    } else if (chrome.runtime.lastError.message.includes("Could not establish connection")) {
+                        this.log(this.logLevels.ERROR, "Could not establish connection with background script.");
+                        this.updateStatus('error', "Connection error. Try refreshing.");
+                    }
+                } else {
+                    console.log("Port disconnected normally.");
+                }
+                
+                // Only update UI if processing was active and no content received, or if an error wasn't already shown
+                const messageContent = assistantMessageDiv.querySelector('.message-content');
+                const hasErrorDisplayed = messageContent && messageContent.querySelector('.error-message');
+
+                if (this.isProcessing && !hasReceivedContent && !hasErrorDisplayed) {
+                    if (messageContent && !messageContent.querySelector('.thinking-container') && !messageContent.querySelector('.tool-execution')) {
+                        messageContent.innerHTML = '<em>Connection lost. Please try again.</em>';
+                    }
+                }
+
+                this.setUIState(true);
+                this.isProcessing = false;
+            });
+
+            // Send message with better error handling
+            try {
+                if (!isPortConnected) {
+                    throw new Error("Port is not connected before sending message.");
+                }
+                
+                port.postMessage({
+                    type: 'PROCESS_MESSAGE',
+                    message: userInput,
+                    modelId: this.modelSelector.value
+                });
+                
+                console.log('Message sent successfully via port');
+            } catch (sendError) {
+                console.error("Error sending message via port:", sendError);
+                const messageContent = assistantMessageDiv.querySelector('.message-content');
+                if (messageContent) {
+                    messageContent.innerHTML = `<div class="error-message">Error: Could not send message. ${this.escapeHtml(sendError.message)}</div>`;
+                }
+                assistantMessageDiv.classList.add('error');
+                this.disconnectPort(port);
+                isPortConnected = false;
+                this.setUIState(true);
+                this.isProcessing = false;
+                return;
+            }
+
         } catch (error) {
-            console.error('Error sending message:', error);
-            this.hideTypingIndicator();
-            
-            // Show error message
-            const errorMessage = `Error: ${error.message}`;
-            this.addMessageToThread('assistant', errorMessage, true);
-            this.addMessageToUI('assistant', errorMessage, true);
-        } finally {
+            console.error('Error in handleSendMessage:', error);
+            const messageContent = assistantMessageDiv.querySelector('.message-content');
+            if (messageContent) {
+                messageContent.innerHTML = `<div class="error-message">Error: ${this.escapeHtml(error.message)}</div>`;
+            }
+            assistantMessageDiv.classList.add('error');
             this.setUIState(true);
+            this.isProcessing = false;
         }
     }
 
+    // Helper method to safely disconnect port
+    disconnectPort(port) {
+        try {
+            if (port) {
+                port.disconnect();
+            }
+        } catch (error) {
+            console.warn('Error disconnecting port:', error);
+        }
+    }
+
+    // New method to handle thinking steps
+    handleThinkingStep(response, assistantMessageDiv) {
+        const { currentStep, totalSteps, content } = response;
+        
+        const messageContent = assistantMessageDiv.querySelector('.message-content');
+        if (!messageContent) return;
+
+        // Get or create thinking container
+        let thinkingContainer = messageContent.querySelector('.thinking-container');
+        if (!thinkingContainer) {
+            thinkingContainer = document.createElement('div');
+            thinkingContainer.className = 'thinking-container';
+            
+            // Create thinking header
+            const thinkingHeader = document.createElement('div');
+            thinkingHeader.className = 'thinking-header';
+            
+            const titleSection = document.createElement('div');
+            titleSection.className = 'thinking-title-section';
+            
+            const thinkingIcon = document.createElement('div');
+            thinkingIcon.className = 'thinking-icon';
+            thinkingIcon.textContent = '🧠';
+            
+            const thinkingTitle = document.createElement('div');
+            thinkingTitle.className = 'thinking-title';
+            thinkingTitle.textContent = 'Sequential Thinking';
+            
+            const thinkingProgress = document.createElement('div');
+            thinkingProgress.className = 'thinking-progress';
+            thinkingProgress.textContent = 'Processing...';
+            
+            titleSection.appendChild(thinkingIcon);
+            titleSection.appendChild(thinkingTitle);
+            
+            thinkingHeader.appendChild(titleSection);
+            thinkingHeader.appendChild(thinkingProgress);
+            
+            // Create thinking steps container
+            const thinkingSteps = document.createElement('div');
+            thinkingSteps.className = 'thinking-steps';
+            
+            thinkingContainer.appendChild(thinkingHeader);
+            thinkingContainer.appendChild(thinkingSteps);
+            
+            // Add to the current assistant message or create a new one
+            const lastMessage = this.messagesContainer.lastElementChild;
+            if (lastMessage && lastMessage.classList.contains('message') && lastMessage.classList.contains('assistant')) {
+                const messageContent = lastMessage.querySelector('.message-content');
+                if (messageContent) {
+                    messageContent.appendChild(thinkingContainer);
+                }
+            } else {
+                // Create a new assistant message for thinking
+                const assistantMessage = this.addMessageToUI('assistant', '');
+                const messageContent = assistantMessage.querySelector('.message-content');
+                if (messageContent) {
+                    messageContent.appendChild(thinkingContainer);
+                }
+            }
+        }
+        
+        // Update progress indicator
+        const thinkingProgress = thinkingContainer.querySelector('.thinking-progress');
+        if (thinkingProgress) {
+            thinkingProgress.textContent = `${currentStep}/${totalSteps}`;
+        }
+        
+        // Check if step already exists
+        let stepDiv = thinkingContainer.querySelector('.thinking-steps').querySelector(`[data-step="${currentStep}"]`);
+        
+        if (!stepDiv) {
+            // Create new step
+            stepDiv = document.createElement('div');
+            stepDiv.className = 'thinking-step active';
+            stepDiv.setAttribute('data-step', currentStep);
+            
+            // Create step header
+            const stepHeader = document.createElement('div');
+            stepHeader.className = 'step-header';
+            
+            const stepNumber = document.createElement('div');
+            stepNumber.className = 'step-number';
+            stepNumber.textContent = `Step ${currentStep}`;
+            
+            const stepStatus = document.createElement('div');
+            stepStatus.className = 'step-status';
+            stepStatus.textContent = 'THINKING';
+            
+            stepHeader.appendChild(stepNumber);
+            stepHeader.appendChild(stepStatus);
+            
+            // Create step content
+            const stepContent = document.createElement('div');
+            stepContent.className = 'step-content';
+            stepContent.innerHTML = this.parseBasicMarkdown(content);
+            
+            stepDiv.appendChild(stepHeader);
+            stepDiv.appendChild(stepContent);
+            
+            thinkingContainer.querySelector('.thinking-steps').appendChild(stepDiv);
+        } else {
+            // Update existing step
+            const stepContent = stepDiv.querySelector('.step-content');
+            const stepStatus = stepDiv.querySelector('.step-status');
+            
+            if (stepContent) {
+                stepContent.innerHTML = this.parseBasicMarkdown(content);
+            }
+            
+            if (stepStatus) {
+                stepStatus.textContent = 'THINKING';
+                stepStatus.className = 'step-status';
+            }
+        }
+        
+        // Mark previous steps as completed
+        const allSteps = thinkingContainer.querySelector('.thinking-steps').querySelectorAll('.thinking-step');
+        allSteps.forEach((step, index) => {
+            const stepNum = parseInt(step.getAttribute('data-step'));
+            if (stepNum < currentStep) {
+                step.className = 'thinking-step completed';
+                const status = step.querySelector('.step-status');
+                if (status) {
+                    status.textContent = 'COMPLETED';
+                    status.className = 'step-status completed';
+                }
+            }
+        });
+        
+        this.scrollToBottom();
+    }
+
     setUIState(enabled) {
-        this.isProcessing = !enabled;
+        this.messageInput.disabled = !enabled;
+        this.sendButton.disabled = !enabled || !this.messageInput.value.trim() || !this.modelSelector.value;
         this.modelSelector.disabled = !enabled;
-        this.sendBtn.disabled = !enabled || !this.messageInput.value.trim() || !this.modelSelector.value;
     }
 
     handleStreamingContent(content) {
@@ -526,64 +893,141 @@ class ModernChatUI {
 
     addThinkingStep(currentStep, totalSteps, content, isRevision = false) {
         const thinkingContainer = this.getOrCreateThinkingContainer();
+        const thinkingSteps = thinkingContainer.querySelector('.thinking-steps');
+        const thinkingProgress = thinkingContainer.querySelector('.thinking-progress');
         
-        const stepDiv = document.createElement('div');
-        stepDiv.className = `thinking-step ${isRevision ? 'revision' : 'active'}`;
-        stepDiv.innerHTML = `
-            <div class="thinking-number ${isRevision ? 'revision' : ''}">${currentStep}</div>
-            <div class="thinking-content">
-                ${this.parseBasicMarkdown(content)}
-                <div class="thinking-meta">
-                    Step ${currentStep} of ${totalSteps}${isRevision ? ' (Revision)' : ''}
-                </div>
-            </div>
-        `;
+        // Update progress indicator
+        if (thinkingProgress) {
+            thinkingProgress.textContent = `${currentStep}/${totalSteps}`;
+        }
         
-        thinkingContainer.appendChild(stepDiv);
+        // Check if step already exists
+        let stepDiv = thinkingSteps.querySelector(`[data-step="${currentStep}"]`);
+        
+        if (!stepDiv) {
+            // Create new step
+            stepDiv = document.createElement('div');
+            stepDiv.className = 'thinking-step active';
+            stepDiv.setAttribute('data-step', currentStep);
+            
+            // Create step header
+            const stepHeader = document.createElement('div');
+            stepHeader.className = 'step-header';
+            
+            const stepNumber = document.createElement('div');
+            stepNumber.className = 'step-number';
+            stepNumber.textContent = `Step ${currentStep}`;
+            
+            const stepStatus = document.createElement('div');
+            stepStatus.className = 'step-status';
+            stepStatus.textContent = isRevision ? 'REVISING' : 'THINKING';
+            
+            stepHeader.appendChild(stepNumber);
+            stepHeader.appendChild(stepStatus);
+            
+            // Create step content
+            const stepContent = document.createElement('div');
+            stepContent.className = 'step-content';
+            stepContent.innerHTML = this.parseBasicMarkdown(content);
+            
+            stepDiv.appendChild(stepHeader);
+            stepDiv.appendChild(stepContent);
+            
+            thinkingSteps.appendChild(stepDiv);
+        } else {
+            // Update existing step
+            const stepContent = stepDiv.querySelector('.step-content');
+            const stepStatus = stepDiv.querySelector('.step-status');
+            
+            if (stepContent) {
+                stepContent.innerHTML = this.parseBasicMarkdown(content);
+            }
+            
+            if (stepStatus) {
+                stepStatus.textContent = isRevision ? 'REVISING' : 'THINKING';
+                stepStatus.className = isRevision ? 'step-status revision' : 'step-status';
+            }
+            
+            if (isRevision) {
+                stepDiv.className = 'thinking-step revision';
+            }
+        }
         
         // Mark previous steps as completed
-        const allSteps = thinkingContainer.querySelectorAll('.thinking-step');
+        const allSteps = thinkingSteps.querySelectorAll('.thinking-step');
         allSteps.forEach((step, index) => {
-            if (index < allSteps.length - 1) {
-                step.classList.remove('active');
-                step.classList.add('completed');
-                const number = step.querySelector('.thinking-number');
-                if (number) number.classList.add('completed');
+            const stepNum = parseInt(step.getAttribute('data-step'));
+            if (stepNum < currentStep) {
+                step.className = 'thinking-step completed';
+                const status = step.querySelector('.step-status');
+                if (status) {
+                    status.textContent = 'COMPLETED';
+                    status.className = 'step-status completed';
+                }
             }
         });
         
         this.scrollToBottom();
+        return stepDiv;
     }
 
     getOrCreateThinkingContainer() {
-        let container = this.messagesContainer.querySelector('.thinking-container');
-        if (!container) {
-            container = document.createElement('div');
-            container.className = 'thinking-container';
-            container.style.cssText = `
-                margin: 1rem 0;
-                padding: 1rem;
-                background: var(--bg-card);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                border-left: 4px solid var(--primary);
-            `;
+        let thinkingContainer = this.messagesContainer.querySelector('.thinking-container');
+        
+        if (!thinkingContainer) {
+            thinkingContainer = document.createElement('div');
+            thinkingContainer.className = 'thinking-container';
             
-            const header = document.createElement('div');
-            header.style.cssText = `
-                font-weight: 600;
-                color: var(--primary);
-                margin-bottom: 1rem;
-                display: flex;
-                align-items: center;
-                gap: 0.5rem;
-            `;
-            header.innerHTML = '🧠 AI Thinking Process';
+            // Create thinking header
+            const thinkingHeader = document.createElement('div');
+            thinkingHeader.className = 'thinking-header';
             
-            container.appendChild(header);
-            this.messagesContainer.appendChild(container);
+            const titleSection = document.createElement('div');
+            titleSection.className = 'thinking-title-section';
+            
+            const thinkingIcon = document.createElement('div');
+            thinkingIcon.className = 'thinking-icon';
+            thinkingIcon.textContent = '🧠';
+            
+            const thinkingTitle = document.createElement('div');
+            thinkingTitle.className = 'thinking-title';
+            thinkingTitle.textContent = 'Sequential Thinking';
+            
+            const thinkingProgress = document.createElement('div');
+            thinkingProgress.className = 'thinking-progress';
+            thinkingProgress.textContent = 'Processing...';
+            
+            titleSection.appendChild(thinkingIcon);
+            titleSection.appendChild(thinkingTitle);
+            
+            thinkingHeader.appendChild(titleSection);
+            thinkingHeader.appendChild(thinkingProgress);
+            
+            // Create thinking steps container
+            const thinkingSteps = document.createElement('div');
+            thinkingSteps.className = 'thinking-steps';
+            
+            thinkingContainer.appendChild(thinkingHeader);
+            thinkingContainer.appendChild(thinkingSteps);
+            
+            // Add to the current assistant message or create a new one
+            const lastMessage = this.messagesContainer.lastElementChild;
+            if (lastMessage && lastMessage.classList.contains('message') && lastMessage.classList.contains('assistant')) {
+                const messageContent = lastMessage.querySelector('.message-content');
+                if (messageContent) {
+                    messageContent.appendChild(thinkingContainer);
+                }
+            } else {
+                // Create a new assistant message for thinking
+                const assistantMessage = this.addMessageToUI('assistant', '');
+                const messageContent = assistantMessage.querySelector('.message-content');
+                if (messageContent) {
+                    messageContent.appendChild(thinkingContainer);
+                }
+            }
         }
-        return container;
+        
+        return thinkingContainer;
     }
 
     showToolExecution(toolName, result) {
@@ -687,99 +1131,127 @@ class ModernChatUI {
         });
     }
 
-    handleInlineToolExecution(response, currentAssistantMessage) {
-        console.log('Handling inline tool execution:', response);
+    handleInlineToolExecution(response, assistantMessageDiv) {
+        const { tool, args, status, message, result, error, stepInfo, context } = response;
         
-        if (!currentAssistantMessage) {
-            currentAssistantMessage = this.addMessageToUI('assistant', '');
-        }
-        
-        let toolIndicator = currentAssistantMessage.querySelector('.tool-indicator');
-        
-        if (response.status === 'executing') {
-            if (!toolIndicator) {
-                toolIndicator = document.createElement('div');
-                toolIndicator.className = 'tool-indicator executing';
-                
-                const icon = document.createElement('div');
-                icon.className = 'tool-icon executing';
-                icon.textContent = '⚙️';
-                
-                const text = document.createElement('div');
-                text.className = 'tool-text';
-                text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'executing');
-                
-                toolIndicator.appendChild(icon);
-                toolIndicator.appendChild(text);
-                currentAssistantMessage.appendChild(toolIndicator);
-                
-                this.scrollToBottom();
-            }
-        } else if (response.status === 'completed') {
-            if (toolIndicator) {
-                toolIndicator.className = 'tool-indicator completed';
-                const icon = toolIndicator.querySelector('.tool-icon');
-                const text = toolIndicator.querySelector('.tool-text');
-                
-                if (icon) {
-                    icon.className = 'tool-icon completed';
-                    icon.textContent = '✅';
-                }
-                
-                if (text) {
-                    text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'completed');
-                }
-                
-                // Auto-hide after 3 seconds
-                setTimeout(() => {
-                    if (toolIndicator && toolIndicator.parentNode) {
-                        toolIndicator.style.opacity = '0';
-                        toolIndicator.style.transform = 'translateY(-10px)';
-                        setTimeout(() => {
-                            if (toolIndicator && toolIndicator.parentNode) {
-                                toolIndicator.remove();
-                            }
-                        }, 300);
-                    }
-                }, 3000);
-            }
-        } else if (response.status === 'error') {
-            if (toolIndicator) {
-                toolIndicator.className = 'tool-indicator error';
-                const icon = toolIndicator.querySelector('.tool-icon');
-                const text = toolIndicator.querySelector('.tool-text');
-                
-                if (icon) {
-                    icon.className = 'tool-icon error';
-                    icon.textContent = '❌';
-                }
-                
-                if (text) {
-                    text.textContent = this.getToolDisplayMessage(response.tool, response.args, 'error', response.error);
+        const messageContent = assistantMessageDiv.querySelector('.message-content');
+        if (!messageContent) return;
+
+        // Get the current thinking step if we have step info
+        let targetContainer = messageContent;
+        if (stepInfo && stepInfo.currentStep) {
+            const thinkingContainer = messageContent.querySelector('.thinking-container');
+            if (thinkingContainer) {
+                const stepDiv = thinkingContainer.querySelector(`[data-step="${stepInfo.currentStep}"]`);
+                if (stepDiv) {
+                    targetContainer = stepDiv.querySelector('.step-content');
                 }
             }
         }
+
+        // Create or update tool execution element
+        let toolExecutionDiv = targetContainer.querySelector(`[data-tool-execution="${tool}"]`);
+        
+        if (!toolExecutionDiv) {
+            toolExecutionDiv = document.createElement('div');
+            toolExecutionDiv.className = 'tool-execution-inline';
+            toolExecutionDiv.setAttribute('data-tool-execution', tool);
+            targetContainer.appendChild(toolExecutionDiv);
+        }
+
+        // Update tool execution display based on status
+        let iconClass = 'executing';
+        let iconText = '⚡';
+        let statusClass = 'executing';
+
+        if (status === 'completed') {
+            iconClass = 'completed';
+            iconText = '✓';
+            statusClass = 'completed';
+        } else if (status === 'error') {
+            iconClass = 'error';
+            iconText = '✗';
+            statusClass = 'error';
+        }
+
+        // Build step info display
+        let stepInfoText = '';
+        if (stepInfo) {
+            stepInfoText = `<div class="tool-step-info">Tool ${stepInfo.toolIndex}/${stepInfo.totalTools} in Step ${stepInfo.currentStep}/${stepInfo.totalSteps}</div>`;
+        }
+
+        // Build context info display
+        let contextInfoText = '';
+        if (context && context.tabId && status === 'completed') {
+            contextInfoText = `<div class="tool-context-info">🔗 Tab context: ${context.tabId}</div>`;
+        }
+
+        // Update the tool execution display
+        toolExecutionDiv.className = `tool-execution-inline ${statusClass}`;
+        toolExecutionDiv.innerHTML = `
+            <div class="tool-icon ${iconClass}">${iconText}</div>
+            <div class="tool-details">
+                <div class="tool-name">${this.formatToolName(tool)}</div>
+                <div class="tool-message">${this.escapeHtml(message || 'Processing...')}</div>
+                ${stepInfoText}
+                ${contextInfoText}
+                ${result && status === 'completed' ? this.formatToolResult(tool, result) : ''}
+                ${error ? `<div class="tool-error">Error: ${this.escapeHtml(error)}</div>` : ''}
+            </div>
+        `;
+
+        this.scrollToBottom();
     }
 
-    getToolDisplayMessage(tool, args, status, error = null) {
-        const toolNames = {
-            'get_active_tabs': 'Getting active tabs',
-            'extract_content': 'Extracting page content',
-            'search_web': 'Searching the web',
-            'take_screenshot': 'Taking screenshot'
-        };
+    formatToolResult(toolName, result) {
+        if (!result || !result.success) return '';
 
-        const toolName = toolNames[tool] || tool;
-
-        switch (status) {
-            case 'executing':
-                return `${toolName}...`;
-            case 'completed':
-                return `${toolName} completed`;
-            case 'error':
-                return `${toolName} failed${error ? `: ${error}` : ''}`;
+        switch (toolName) {
+            case 'openNewTab':
+                const tabInfo = result.tabId ? ` (Tab ID: ${result.tabId})` : '';
+                return `<div class="tool-result">✅ New tab opened successfully${tabInfo}</div>`;
+            
+            case 'searchWeb':
+                const searchTabInfo = result.tabId ? ` in tab ${result.tabId}` : '';
+                return `<div class="tool-result">✅ Search completed for: "${result.query || 'unknown'}"${searchTabInfo}</div>`;
+            
+            case 'getPageContent':
+                const contentLength = result.content?.length || result.markdownContent?.length || 0;
+                const resultCount = result.resultCount || 0;
+                const contentTabInfo = result.tabId ? ` from tab ${result.tabId}` : '';
+                if (resultCount > 0) {
+                    return `<div class="tool-result">✅ Extracted ${resultCount} search results (${contentLength} characters)${contentTabInfo}</div>`;
+                } else {
+                    return `<div class="tool-result">✅ Page content extracted (${contentLength} characters)${contentTabInfo}</div>`;
+                }
+            
+            // Stagehand tools
+            case 'stagehandNavigate':
+                const navTabInfo = result.tabId ? ` (Tab ID: ${result.tabId})` : '';
+                return `<div class="tool-result">✅ Successfully navigated to: ${result.url}${navTabInfo}</div>`;
+            
+            case 'stagehandAct':
+                return `<div class="tool-result">✅ Action completed: ${result.action}</div>`;
+            
+            case 'stagehandExtract':
+                return `<div class="tool-result">✅ Extracted ${result.length} characters of content</div>`;
+            
+            case 'stagehandObserve':
+                return `<div class="tool-result">✅ Found ${result.count} elements matching: "${result.instruction}"</div>`;
+            
+            case 'screenshot':
+                const screenshotTabInfo = result.tabId ? ` from tab ${result.tabId}` : '';
+                const screenshotHtml = result.dataUrl ? 
+                    `<div class="tool-result">✅ Screenshot captured: ${result.filename}${screenshotTabInfo}</div>
+                     <div class="screenshot-preview">
+                         <img src="${result.dataUrl}" alt="Screenshot" style="max-width: 300px; max-height: 200px; border-radius: 8px; border: 1px solid var(--border-color); margin-top: 8px;" onclick="window.open('${result.dataUrl}', '_blank')">
+                         <div style="font-size: 0.75em; color: var(--text-tertiary); margin-top: 4px;">Click to view full size</div>
+                     </div>` :
+                    `<div class="tool-result">✅ Screenshot captured: ${result.filename}${screenshotTabInfo}</div>`;
+                return screenshotHtml;
+            
             default:
-                return toolName;
+                return `<div class="tool-result">✅ ${toolName} completed successfully</div>`;
         }
     }
 
@@ -794,34 +1266,30 @@ class ModernChatUI {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${role}${isError ? ' error' : ''}`;
         
-        const bubbleDiv = document.createElement('div');
-        bubbleDiv.className = 'message-bubble';
-        
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'message-content';
+        const messageContent = document.createElement('div');
+        messageContent.className = 'message-content';
         
         if (content) {
-            if (typeof marked !== 'undefined' && role === 'assistant') {
-                contentDiv.innerHTML = marked.parse(content);
-                if (typeof Prism !== 'undefined') {
-                    Prism.highlightAllUnder(contentDiv);
-                }
-                this.addCopyButtonsToCodeBlocks(contentDiv);
+            if (role === 'user') {
+                messageContent.textContent = content;
             } else {
-                contentDiv.textContent = content;
+                messageContent.innerHTML = this.parseBasicMarkdown(content);
+                // Add copy buttons to code blocks after parsing
+                setTimeout(() => this.addCopyButtonsToCodeBlocks(messageContent), 100);
             }
         }
         
-        bubbleDiv.appendChild(contentDiv);
-        messageDiv.appendChild(bubbleDiv);
+        messageDiv.appendChild(messageContent);
         this.messagesContainer.appendChild(messageDiv);
-        
         this.scrollToBottom();
+        
         return messageDiv;
     }
 
     scrollToBottom() {
-        this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+        requestAnimationFrame(() => {
+            this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+        });
     }
 
     addMessageToThread(role, content, isError = false) {
@@ -839,11 +1307,6 @@ class ModernChatUI {
 
     clearMessages() {
         this.messagesContainer.innerHTML = '';
-        const thread = this.threads.get(this.currentThread);
-        if (thread) {
-            thread.messages = [];
-            this.saveThreads();
-        }
     }
 
     showTypingIndicator() {
@@ -899,142 +1362,96 @@ class ModernChatUI {
         }, 3000);
     }
 
-    async sendMessageToBackground(message, onStream = null) {
+    async sendMessageToBackground(userInput, assistantResponseDiv, onStreamCallback) {
         return new Promise((resolve, reject) => {
-            this.currentMessage = null;
-            this.currentContent = '';
-            let isCompleted = false;
-            let timeoutId = null;
-            
-            // Set a timeout to prevent hanging
-            timeoutId = setTimeout(() => {
-                if (!isCompleted) {
-                    console.warn('Message processing timeout, forcing completion');
-                    this.hideTypingIndicator();
-                    
-                    if (this.currentContent && this.currentContent.trim()) {
-                        this.addMessageToThread('assistant', this.currentContent);
-                        this.updateThreadPreview();
-                    } else {
-                        // Add a timeout message if no content was received
-                        const timeoutMessage = "I apologize, but the request timed out. Please try again.";
-                        this.addMessageToThread('assistant', timeoutMessage, true);
-                        this.addMessageToUI('assistant', timeoutMessage, true);
-                    }
-                    
-                    isCompleted = true;
-                    resolve();
+            let promiseSettled = false;
+            let hasReceivedContentOrDoneSignal = false; // Track if meaningful data came through
+
+            const port = chrome.runtime.connect({ name: 'chat' });
+
+            const timeoutDuration = 60000; 
+            const timeoutId = setTimeout(() => {
+                if (!promiseSettled) {
+                    promiseSettled = true;
+                    console.warn('Message processing timeout, disconnecting port.');
+                    port.disconnect(); 
+                    reject(new Error('Message processing timeout'));
                 }
-            }, 60000); // 60 second timeout
-            
-            const completeResponse = () => {
-                if (isCompleted) return;
-                
-                isCompleted = true;
-                if (timeoutId) {
+            }, timeoutDuration);
+
+            const settlePromise = (fn, value) => {
+                if (!promiseSettled) {
+                    promiseSettled = true;
                     clearTimeout(timeoutId);
+                    // It's generally safer to let onDisconnect handle the actual port.disconnect()
+                    // if the disconnection is due to an error or natural end.
+                    // However, if settlePromise is called due to an internal logic (e.g. explicit resolve/reject path not from port events),
+                    // then disconnecting here is fine.
+                    try { port.disconnect(); } catch(e) { console.warn("Error disconnecting port in settlePromise (might be already disconnected):", e); }
+                    fn(value);
                 }
-                
-                console.log('Completing response');
-                this.hideTypingIndicator();
-                
-                if (this.currentContent && this.currentContent.trim()) {
-                    console.log('Saving final content to thread:', this.currentContent.length, 'characters');
-                    this.addMessageToThread('assistant', this.currentContent);
-                    this.updateThreadPreview();
-                }
-                
-                this.currentMessage = null;
-                this.currentContent = '';
-                resolve();
             };
-            
-            try {
-                // Create port connection for streaming
-                const port = chrome.runtime.connect({ name: 'chat' });
-                
-                // Handle streaming messages
-                port.onMessage.addListener((response) => {
-                    console.log('Received port message:', response);
-                    
-                    if (response.error) {
-                        console.error('Received error from background:', response.error);
-                        if (!isCompleted) {
-                            isCompleted = true;
-                            if (timeoutId) clearTimeout(timeoutId);
-                            this.hideTypingIndicator();
-                            reject(new Error(response.error));
-                        }
-                        return;
-                    }
 
-                    // Handle different response types
-                    if (response.type === 'delta' && response.content) {
-                        if (onStream) {
-                            onStream(response.content);
-                        }
-                    } else if (response.type === 'stream' && response.content) {
-                        if (onStream) {
-                            onStream(response.content);
-                        }
-                    } else if (response.type === 'complete' || response.done) {
-                        console.log('Stream completed, finalizing response');
-                        port.disconnect();
-                        completeResponse();
-                    } else if (response.type === 'tool_execution_inline') {
-                        console.log('Handling tool execution:', response.tool, response.status);
-                        // Handle inline tool execution updates
-                        this.handleInlineToolExecution(response, this.currentMessage);
-                    } else if (response.choices && response.choices[0] && response.choices[0].delta && response.choices[0].delta.content) {
-                        // Handle Azure OpenAI format
-                        if (onStream) {
-                            onStream(response.choices[0].delta.content);
-                        }
-                    } else {
-                        console.log('Unhandled response type:', response);
-                    }
-                });
+            port.onMessage.addListener((bgResponse) => {
+                if (promiseSettled) return;
 
-                // Handle port disconnection
-                port.onDisconnect.addListener(() => {
-                    console.log('Port disconnected');
+                if (bgResponse.error) {
+                    console.error('Received error from background:', bgResponse.error);
+                    settlePromise(reject, new Error(bgResponse.error));
+                    return;
+                }
+
+                if (bgResponse.type === 'tool_execution_inline') {
+                    this.handleInlineToolExecution(bgResponse, assistantResponseDiv);
+                    // Tool execution itself is a form of content/activity
+                    hasReceivedContentOrDoneSignal = true; 
+                } else if (bgResponse.type === 'delta' && bgResponse.content) {
+                    if (onStreamCallback) onStreamCallback(bgResponse.content);
+                    hasReceivedContentOrDoneSignal = true;
+                } else if (bgResponse.choices && bgResponse.choices[0] && bgResponse.choices[0].delta && bgResponse.choices[0].delta.content) { 
+                    if (onStreamCallback) onStreamCallback(bgResponse.choices[0].delta.content);
+                    hasReceivedContentOrDoneSignal = true;
+                } else if (bgResponse.type === 'complete' || bgResponse.done) {
+                    console.log('Stream completed signal received from background.');
+                    hasReceivedContentOrDoneSignal = true;
+                    settlePromise(resolve);
+                } else {
+                    console.log('Unhandled response type or empty delta in sendMessageToBackground:', bgResponse);
+                }
+            });
+
+            port.onDisconnect.addListener(() => {
+                if (!promiseSettled) { 
+                    promiseSettled = true;
+                    clearTimeout(timeoutId);
                     if (chrome.runtime.lastError) {
-                        console.error('Port disconnected with error:', chrome.runtime.lastError);
-                        if (!isCompleted) {
-                            isCompleted = true;
-                            if (timeoutId) clearTimeout(timeoutId);
-                            this.hideTypingIndicator();
-                            reject(new Error(chrome.runtime.lastError.message));
-                        }
+                        console.error('Port disconnected with error:', chrome.runtime.lastError.message);
+                        reject(new Error(chrome.runtime.lastError.message || 'Port disconnected unexpectedly'));
+                    } else if (!hasReceivedContentOrDoneSignal) {
+                        // Normal disconnect, but nothing meaningful was exchanged (no content, no 'done')
+                        console.warn('Port disconnected before any content or completion signal was received.');
+                        reject(new Error('Connection closed prematurely by the background script without data.'));
                     } else {
-                        // Normal disconnection - ensure we complete properly
-                        console.log('Normal port disconnection, completing response');
-                        completeResponse();
+                        // Normal disconnect after content/done signal implies success
+                        console.log('Port disconnected normally after processing. Assuming completion.');
+                        resolve(); 
                     }
-                });
+                }
+            });
 
-                // Send message using the format expected by background script
-                console.log('Sending message to background:', {
-                    type: 'PROCESS_MESSAGE',
-                    message: message,
-                    modelId: this.modelSelector.value
-                });
-                
+            try {
                 port.postMessage({
                     type: 'PROCESS_MESSAGE',
-                    message: message,
+                    message: userInput,
                     modelId: this.modelSelector.value,
-                    pageContent: '',  // Chat UI doesn't have page content
-                    pageUrl: window.location.href,
+                    pageUrl: window.location.href, 
                     pageTitle: document.title
                 });
-
             } catch (error) {
-                console.error('Error in sendMessageToBackground:', error);
-                if (!isCompleted) {
-                    isCompleted = true;
-                    if (timeoutId) clearTimeout(timeoutId);
-                    this.hideTypingIndicator();
+                if (!promiseSettled) {
+                    promiseSettled = true;
+                    clearTimeout(timeoutId);
+                    console.error('Failed to post message to port:', error);
                     reject(error);
                 }
             }

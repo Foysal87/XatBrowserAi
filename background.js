@@ -224,6 +224,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    if (request.type === 'EXECUTE_TOOL') {
+        const { tool, args } = request;
+        
+        executeToolCall({ tool, args })
+            .then(result => sendResponse(result))
+            .catch(error => sendResponse({ error: error.message }));
+        return true;
+    }
+
     if (request.type === 'sendMessage') {
         handleMessage(request, sender, sendResponse);
         return true; // Keep the message channel open for streaming
@@ -509,17 +518,7 @@ function validateRequirements(requirements) {
 async function processMessage(message, modelId) {
     try {
         // Get the configuration
-        const config = await new Promise((resolve) => {
-            chrome.storage.local.get(['configContent'], (result) => {
-                try {
-                    resolve(result.configContent ? JSON.parse(result.configContent) : null);
-                } catch (error) {
-                    console.error('Error parsing config:', error);
-                    resolve(null);
-                }
-            });
-        });
-
+        const config = await getConfig();
         if (!config) {
             throw new Error('No configuration found. Please set up your AI models in the extension settings.');
         }
@@ -688,7 +687,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
     port.onMessage.addListener(async (message) => {
         if (!isConnected) {
-            port.postMessage({ error: 'Connection lost. Please refresh the page.' });
+            console.warn('Received message on disconnected port, ignoring:', message.type);
             return;
         }
 
@@ -696,7 +695,14 @@ chrome.runtime.onConnect.addListener((port) => {
         
         if (message.type !== 'PROCESS_MESSAGE') {
             console.warn('Unknown message type on port:', message.type);
-            port.postMessage({ error: 'Unknown message type' });
+            if (isConnected) {
+                try {
+                    port.postMessage({ error: 'Unknown message type' });
+                } catch (e) {
+                    console.warn('Error sending error response:', e);
+                    isConnected = false;
+                }
+            }
             return;
         }
 
@@ -733,7 +739,14 @@ chrome.runtime.onConnect.addListener((port) => {
 
             if (!client) {
                 console.error('Selected model not found in configuration:', message.modelId);
-                port.postMessage({ error: 'Selected model not found in configuration.' });
+                if (isConnected) {
+                    try {
+                        port.postMessage({ error: 'Selected model not found in configuration.' });
+                    } catch (e) {
+                        console.warn('Error sending error response:', e);
+                        isConnected = false;
+                    }
+                }
                 return;
             }
 
@@ -751,9 +764,13 @@ chrome.runtime.onConnect.addListener((port) => {
 Use this context when relevant to the user's request.`;
             }
 
-            // Enhanced streaming callback with tool execution detection
+            // Enhanced streaming callback with sequential thinking and tool execution detection
             const processStreamChunk = (chunk) => {
                 try {
+                    if (!isConnected) {
+                        console.warn("processStreamChunk: Port disconnected, cannot send chunk.");
+                        return;
+                    }
                     console.log('Processing stream chunk for port:', chunk ? typeof chunk : 'null');
                     
                     if (!chunk) {
@@ -763,7 +780,14 @@ Use this context when relevant to the user's request.`;
                     
                     if (chunk.done) {
                         console.log('Stream complete, sending done signal');
-                        port.postMessage({ done: true });
+                        if (isConnected) {
+                            try {
+                                port.postMessage({ done: true });
+                            } catch (e) {
+                                console.warn('Error sending done signal:', e);
+                                isConnected = false;
+                            }
+                        }
                         return;
                     }
                     
@@ -783,372 +807,240 @@ Use this context when relevant to the user's request.`;
                     if (content && content.length > 0) {
                         console.log('Processing content chunk:', content);
                         
-                        // Detect and extract tool execution patterns
-                        const toolPatterns = [
-                            /\{"tool":\s*"([^"]+)",\s*"args":\s*\{[^}]*\}\}/g,
-                            /\{\s*"tool"\s*:\s*"([^"]+)"\s*,\s*"args"\s*:\s*\{[^}]*\}\s*\}/g,
-                            /\{"tool":"([^"]+)","args":\{[^}]*\}\}/g
-                        ];
-                        
-                        let toolMatches = null;
-                        let usedPattern = null;
-                        
-                        for (const pattern of toolPatterns) {
-                            const matches = content.match(pattern);
-                            if (matches && matches.length > 0) {
-                                toolMatches = matches;
-                                usedPattern = pattern;
-                                break;
-                            }
+                        // Accumulate content for thinking block detection
+                        if (!processStreamChunk.accumulatedContent) {
+                            processStreamChunk.accumulatedContent = '';
                         }
+                        processStreamChunk.accumulatedContent += content;
                         
-                        // Check for tool intention patterns if no JSON found
-                        if (!toolMatches) {
-                            const intentionPatterns = [
-                                { pattern: /I'll search for|I will search for|Let me search for|Searching for/i, tool: 'searchWeb' },
-                                { pattern: /I'll get the page content|I will get the page content|Let me get the page content/i, tool: 'getPageContent' },
-                                { pattern: /I'll open a new tab|I will open a new tab|Let me open a new tab/i, tool: 'openNewTab' }
-                            ];
+                        // Check for thinking blocks
+                        const thinkingMatches = processStreamChunk.accumulatedContent.match(/\[THINKING:(\d+)\/(\d+)\]([\s\S]*?)\[\/THINKING\]/g);
+                        
+                        if (thinkingMatches) {
+                            console.log('Found thinking blocks:', thinkingMatches.length);
                             
-                            for (const { pattern, tool } of intentionPatterns) {
-                                if (pattern.test(content)) {
-                                    console.log('Detected tool intention without proper JSON format');
-                                    if (tool === 'searchWeb' && message.message) {
-                                        const fallbackToolCall = {
-                                            tool: 'searchWeb',
-                                            args: { query: message.message }
-                                        };
-                                        toolMatches = [JSON.stringify(fallbackToolCall)];
-                                        break;
+                            for (const thinkingBlock of thinkingMatches) {
+                                const thinkingMatch = thinkingBlock.match(/\[THINKING:(\d+)\/(\d+)\]([\s\S]*?)\[\/THINKING\]/);
+                                if (thinkingMatch) {
+                                    const [fullMatch, currentStep, totalSteps, thinkingContent] = thinkingMatch;
+                                    
+                                    // Send thinking step to UI
+                                    if (!isConnected) {
+                                        console.warn("processStreamChunk: Port disconnected, cannot notify thinking step.");
+                                    } else {
+                                        try {
+                                            port.postMessage({
+                                                type: 'thinking_step',
+                                                currentStep: parseInt(currentStep),
+                                                totalSteps: parseInt(totalSteps),
+                                                content: thinkingContent.trim()
+                                            });
+                                        } catch (e) {
+                                            console.warn('Error sending thinking step:', e);
+                                            isConnected = false;
+                                            return;
+                                        }
+                                    }
+                                    
+                                    // Look for tool calls within thinking content
+                                    const toolMatches = thinkingContent.match(/\{"tool":\s*"([^"]+)",\s*"args":\s*\{[^}]*\}\}/g);
+                                    
+                                    if (toolMatches) {
+                                        console.log('Found tools in thinking block:', toolMatches);
+                                        
+                                        // Execute tools sequentially
+                                        executeSequentialTools(toolMatches, port, currentStep, totalSteps, isConnected);
+                                        
+                                        // Remove tool JSON from content sent to UI
+                                        let filteredThinkingContent = thinkingContent;
+                                        toolMatches.forEach(toolMatch => {
+                                            filteredThinkingContent = filteredThinkingContent.replace(toolMatch, '');
+                                        });
+                                        
+                                        // Update thinking step with filtered content
+                                        if (!isConnected) {
+                                            console.warn("processStreamChunk: Port disconnected, cannot notify thinking step.");
+                                        } else {
+                                            try {
+                                                port.postMessage({
+                                                    type: 'thinking_step',
+                                                    currentStep: parseInt(currentStep),
+                                                    totalSteps: parseInt(totalSteps),
+                                                    content: filteredThinkingContent.trim()
+                                                });
+                                            } catch (e) {
+                                                console.warn('Error sending filtered thinking step:', e);
+                                                isConnected = false;
+                                                return;
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            
+                            // Remove processed thinking blocks from accumulated content
+                            thinkingMatches.forEach(block => {
+                                processStreamChunk.accumulatedContent = processStreamChunk.accumulatedContent.replace(block, '');
+                            });
                         }
                         
-                        // Process tool executions if found
-                        if (toolMatches) {
-                            console.log('Processing tool executions:', toolMatches);
-                            processToolExecutions(toolMatches, port, client, enhancedSystemMessage, message);
-                            
-                            // Filter out tool JSON and intention phrases from user-visible content
-                            let filteredContent = content;
-                            
-                            // Remove JSON tool calls
-                            if (usedPattern) {
-                                filteredContent = filteredContent.replace(usedPattern, '').trim();
+                        // Send remaining content (non-thinking blocks) to UI
+                        const remainingContent = content.replace(/\[THINKING:(\d+)\/(\d+)\][\s\S]*?\[\/THINKING\]/g, '');
+                        if (remainingContent.trim()) {
+                            if (!isConnected) {
+                                console.warn("processStreamChunk: Port disconnected, cannot send remaining content.");
+                                return;
                             }
-                            
-                            // Remove tool intention phrases
-                            const intentionPhrases = [
-                                /I'll search for[^.]*\.\s*/gi,
-                                /Let me search for[^.]*\.\s*/gi,
-                                /I will search for[^.]*\.\s*/gi,
-                                /Searching for[^.]*\.\s*/gi,
-                                /I'll get the page content[^.]*\.\s*/gi,
-                                /Let me get the page content[^.]*\.\s*/gi,
-                                /I will get the page content[^.]*\.\s*/gi,
-                                /I'll open a new tab[^.]*\.\s*/gi,
-                                /Let me open a new tab[^.]*\.\s*/gi,
-                                /I will open a new tab[^.]*\.\s*/gi
-                            ];
-                            
-                            intentionPhrases.forEach(phrase => {
-                                filteredContent = filteredContent.replace(phrase, '');
-                            });
-                            
-                            // Clean up extra whitespace
-                            filteredContent = filteredContent.replace(/\s+/g, ' ').trim();
-                            
-                            // Only send content if there's meaningful text left
-                            if (filteredContent && filteredContent.length > 10) {
-                                console.log('Sending filtered content chunk to port:', filteredContent.length, 'chars');
+                            try {
                                 port.postMessage({
                                     type: 'delta',
-                                    content: filteredContent,
+                                    content: remainingContent,
                                     role: 'assistant'
                                 });
+                            } catch (e) {
+                                console.warn('Error sending remaining content:', e);
+                                isConnected = false;
+                                return;
                             }
-                        } else {
-                            // No tool execution detected, send content as-is
-                            console.log('Sending content chunk to port:', content.length, 'chars');
-                            port.postMessage({
-                                type: 'delta',
-                                content: content,
-                                role: 'assistant'
-                            });
                         }
                     }
                 } catch (error) {
                     console.error('Error processing stream chunk:', error);
-                    port.postMessage({ error: 'Error processing stream: ' + error.message });
+                    if (isConnected) {
+                        try {
+                            port.postMessage({ error: 'Error processing stream: ' + error.message });
+                        } catch (e) {
+                            console.warn('Error sending stream error:', e);
+                            isConnected = false;
+                        }
+                    }
                 }
             };
             
-            // New function to handle tool execution chain
-            async function processToolExecutions(toolMatches, port, client, systemMessage, originalMessage) {
-                console.log('Processing tool executions:', toolMatches.length, 'tools found');
-                const toolResults = [];
+            // Sequential tool execution function
+            async function executeSequentialTools(toolMatches, port, currentStep, totalSteps) {
+                console.log('Executing sequential tools:', toolMatches.length);
                 
-                for (const match of toolMatches) {
+                // Context to maintain state between tools
+                let executionContext = {
+                    currentTabId: null,
+                    lastResult: null,
+                    variables: {}
+                };
+                
+                for (let i = 0; i < toolMatches.length; i++) {
+                    const toolMatch = toolMatches[i];
+                    let toolCall; // Declare toolCall outside the try block
+                    
                     try {
-                        const toolCall = JSON.parse(match);
-                        console.log('Executing tool:', toolCall.tool, 'with args:', toolCall.args);
+                        toolCall = JSON.parse(toolMatch); // Assign inside the try block
+                        console.log(`Executing tool ${i + 1}/${toolMatches.length}:`, toolCall.tool);
                         
-                        // Notify UI of tool execution start (inline with response)
-                        port.postMessage({
-                            type: 'tool_execution_inline',
-                            tool: toolCall.tool,
-                            args: toolCall.args,
-                            status: 'executing',
-                            message: getToolExecutionMessage(toolCall.tool, 'executing')
-                        });
+                        // Enhance tool arguments with context
+                        const enhancedArgs = { ...toolCall.args };
                         
-                        // Execute the tool
-                        const toolResult = await executeToolCall(toolCall);
+                        // Auto-inject tabId for tools that need it
+                        if (executionContext.currentTabId && 
+                            ['searchWeb', 'getPageContent', 'stagehandAct', 'stagehandExtract', 'stagehandObserve', 'screenshot'].includes(toolCall.tool) &&
+                            !enhancedArgs.tabId) {
+                            enhancedArgs.tabId = executionContext.currentTabId;
+                            console.log(`Auto-injected tabId ${executionContext.currentTabId} for ${toolCall.tool}`);
+                        }
+                        
+                        // Notify UI of tool execution start
+                        if (!isConnected) {
+                            console.warn("executeSequentialTools: Port disconnected, cannot notify tool start.");
+                            break;
+                        } else {
+                            try {
+                                port.postMessage({
+                                    type: 'tool_execution_inline',
+                                    tool: toolCall.tool,
+                                    args: enhancedArgs,
+                                    status: 'executing',
+                                    message: `Step ${currentStep}/${totalSteps}: ${getToolExecutionMessage(toolCall.tool, 'executing')}`,
+                                    stepInfo: { currentStep, totalSteps, toolIndex: i + 1, totalTools: toolMatches.length }
+                                });
+                            } catch (e) {
+                                console.warn('Error sending tool start notification:', e);
+                                isConnected = false;
+                                break;
+                            }
+                        }
+                        
+                        // Execute the tool with enhanced arguments
+                        const toolResult = await executeToolCall({ tool: toolCall.tool, args: enhancedArgs });
                         console.log('Tool execution completed:', toolCall.tool, 'success:', toolResult.success);
                         
-                        // Notify UI of tool completion
-                        port.postMessage({
-                            type: 'tool_execution_inline',
-                            tool: toolCall.tool,
-                            args: toolCall.args,
-                            result: toolResult,
-                            status: 'completed',
-                            message: getToolExecutionMessage(toolCall.tool, 'completed')
-                        });
+                        // Update execution context based on tool result
+                        if (toolResult.success) {
+                            executionContext.lastResult = toolResult;
+                            
+                            // Update tabId if tool returned one
+                            if (toolResult.tabId) {
+                                executionContext.currentTabId = toolResult.tabId;
+                                console.log(`Updated context tabId to: ${toolResult.tabId}`);
+                            }
+                            
+                            // Store any variables from the result
+                            if (toolResult.variables) {
+                                executionContext.variables = { ...executionContext.variables, ...toolResult.variables };
+                            }
+                        }
                         
-                        toolResults.push({
-                            tool: toolCall.tool,
-                            args: toolCall.args,
-                            result: toolResult
-                        });
+                        // Notify UI of tool completion with results
+                        if (!isConnected) {
+                            console.warn("executeSequentialTools: Port disconnected, cannot notify tool completion.");
+                            break;
+                        } else {
+                            try {
+                                port.postMessage({
+                                    type: 'tool_execution_inline',
+                                    tool: toolCall.tool,
+                                    args: enhancedArgs,
+                                    result: toolResult,
+                                    status: 'completed',
+                                    message: `Step ${currentStep}/${totalSteps}: ${getToolExecutionMessage(toolCall.tool, 'completed')}`,
+                                    stepInfo: { currentStep, totalSteps, toolIndex: i + 1, totalTools: toolMatches.length },
+                                    context: { tabId: executionContext.currentTabId } // Include context in response
+                                });
+                            } catch (e) {
+                                console.warn('Error sending tool completion notification:', e);
+                                isConnected = false;
+                                break;
+                            }
+                        }
                         
-                        // Add delay between tool executions for proper sequencing
-                        if (toolCall.tool === 'searchWeb') {
-                            console.log('Search completed, waiting before next step...');
-                            await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced delay
+                        // Add delay between tools for better UX
+                        if (i < toolMatches.length - 1) {
+                            await new Promise(resolve => setTimeout(resolve, 1000));
                         }
                         
                     } catch (error) {
-                        console.error('Tool execution error for tool:', match, 'Error:', error);
-                        port.postMessage({
-                            type: 'tool_execution_inline',
-                            tool: toolCall?.tool || 'unknown',
-                            args: toolCall?.args || {},
-                            error: error.message,
-                            status: 'error',
-                            message: `Error executing ${toolCall?.tool || 'tool'}: ${error.message}`
-                        });
-                    }
-                }
-                
-                console.log('All tools executed, continuing with results. Total results:', toolResults.length);
-                
-                // Continue conversation with tool results
-                if (toolResults.length > 0) {
-                    await continueConversationWithToolResults(toolResults, port, client, systemMessage, originalMessage);
-                } else {
-                    console.log('No successful tool results, sending error response');
-                    port.postMessage({ error: 'No tools were executed successfully' });
-                }
-            }
-
-            // Function to continue conversation with tool results
-            async function continueConversationWithToolResults(toolResults, port, client, systemMessage, originalMessage) {
-                try {
-                    // Check if we just completed a search and need to extract content
-                    const searchResult = toolResults.find(result => result.tool === 'searchWeb' && result.result.success);
-                    
-                    if (searchResult && searchResult.result.tabId) {
-                        console.log('Search completed, now extracting page content...');
-                        
-                        // Wait for the search page to fully load
-                        await new Promise(resolve => setTimeout(resolve, 2000)); // Reduced from 3000ms
-                        
-                        // Automatically execute getPageContent
-                        try {
-                            port.postMessage({
-                                type: 'tool_execution_inline',
-                                tool: 'getPageContent',
-                                args: { tabId: searchResult.result.tabId },
-                                status: 'executing',
-                                message: 'Extracting search results...'
-                            });
-                            
-                            console.log('Executing getPageContent for tab:', searchResult.result.tabId);
-                            const contentResult = await executeGetPageContent({ tabId: searchResult.result.tabId });
-                            console.log('Content extraction result:', contentResult);
-                            
-                            if (contentResult.success) {
+                        console.error('Sequential tool execution error:', error);
+                        if (isConnected) {
+                            try {
                                 port.postMessage({
                                     type: 'tool_execution_inline',
-                                    tool: 'getPageContent',
-                                    args: { tabId: searchResult.result.tabId },
-                                    result: contentResult,
-                                    status: 'completed',
-                                    message: 'Search results extracted successfully'
-                                });
-                            } else {
-                                port.postMessage({
-                                    type: 'tool_execution_inline',
-                                    tool: 'getPageContent',
-                                    args: { tabId: searchResult.result.tabId },
-                                    result: contentResult,
-                                    status: 'error',
-                                    message: 'Content extraction failed, but continuing with search results'
-                                });
-                            }
-                            
-                            // Add the content extraction result to tool results regardless of success
-                            toolResults.push({
-                                tool: 'getPageContent',
-                                args: { tabId: searchResult.result.tabId },
-                                result: contentResult
-                            });
-                            
-                        } catch (error) {
-                            console.error('Error extracting page content:', error);
-                            port.postMessage({
-                                type: 'tool_execution_inline',
-                                tool: 'getPageContent',
-                                args: { tabId: searchResult.result.tabId },
-                                error: error.message,
-                                status: 'error',
-                                message: `Error extracting content: ${error.message}`
-                            });
-                            
-                            // Add failed result to tool results so we can still continue
-                            toolResults.push({
-                                tool: 'getPageContent',
-                                args: { tabId: searchResult.result.tabId },
-                                result: {
-                                    success: false,
+                                    tool: toolCall?.tool || 'unknown', // Now toolCall can be safely accessed here
+                                    args: toolCall?.args || {},
                                     error: error.message,
-                                    content: 'Content extraction failed'
-                                }
-                            });
-                        }
-                    }
-                    
-                    // Format tool results for AI with better structure
-                    const toolResultsText = toolResults.map(result => {
-                        if (result.tool === 'getPageContent') {
-                            if (result.result.success && result.result.content) {
-                                // Use markdown content if available, otherwise fall back to regular content
-                                const contentToUse = result.result.markdownContent || result.result.content;
-                                return `SEARCH RESULTS EXTRACTED:
-URL: ${result.result.url}
-Title: ${result.result.title}
-Results Found: ${result.result.resultCount || 'Unknown'}
-Extracted At: ${result.result.extractedAt}
-
-CONTENT (MARKDOWN FORMAT):
-${contentToUse}`;
-                            } else {
-                                // Handle failed content extraction
-                                return `CONTENT EXTRACTION ATTEMPTED:
-Status: Failed
-Error: ${result.result.error || 'Unknown error'}
-Note: Search was completed but content extraction failed. Please provide a response based on the search query.`;
-                            }
-                        } else if (result.tool === 'searchWeb') {
-                            return `SEARCH EXECUTED:
-Query: ${result.args.query}
-Search URL: ${result.result.url}
-Status: ${result.result.success ? 'Success' : 'Failed'}
-Tab ID: ${result.result.tabId}`;
-                        }
-                        return `TOOL: ${result.tool}
-Args: ${JSON.stringify(result.args)}
-Result: ${JSON.stringify(result.result, null, 2)}`;
-                    }).join('\n\n');
-                    
-                    const followUpMessage = `Based on the search results below, provide a comprehensive and well-formatted response to the user's request: "${originalMessage.message}"
-
-TOOL EXECUTION RESULTS:
-${toolResultsText}
-
-INSTRUCTIONS:
-1. If content was successfully extracted, analyze the search results thoroughly and provide specific, current information
-2. Use the extracted search results to provide accurate, up-to-date information about the topic
-3. Format your response with proper markdown (use **bold** for important points, bullet points for lists, headers for sections)
-4. Include relevant links from the search results when mentioning specific information
-5. Organize the information logically with clear sections and headers
-6. If multiple search results cover the same topic, synthesize the information
-7. Be comprehensive but concise, focusing on the most relevant and recent information
-8. If content extraction failed, provide a helpful response based on the search query and general knowledge
-
-Please provide a professional, informative response based on the actual search results. Structure your response with clear headings and include specific details from the search results.`;
-                    
-                    // Create follow-up stream processor that filters out any additional tool calls
-                    const followUpProcessor = (chunk) => {
-                        try {
-                            if (chunk.done) {
-                                port.postMessage({ done: true });
-                                return;
-                            }
-                            
-                            let content = '';
-                            if (chunk.type === 'delta' && chunk.content) {
-                                content = chunk.content;
-                            } else if (chunk.content) {
-                                content = chunk.content;
-                            } else if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta && chunk.choices[0].delta.content) {
-                                content = chunk.choices[0].delta.content;
-                            } else if (typeof chunk === 'string') {
-                                content = chunk;
-                            }
-                            
-                            if (content) {
-                                // Filter out any additional tool calls in the follow-up response
-                                let filteredContent = content;
-                                
-                                // Remove any JSON tool patterns
-                                const toolJsonPattern = /\{"tool":[^}]+\}/g;
-                                filteredContent = filteredContent.replace(toolJsonPattern, '');
-                                
-                                // Remove tool intention phrases
-                                const intentionPhrases = [
-                                    /I'll search for[^.]*\.\s*/gi,
-                                    /Let me search for[^.]*\.\s*/gi,
-                                    /I will search for[^.]*\.\s*/gi,
-                                    /Searching for[^.]*\.\s*/gi
-                                ];
-                                
-                                intentionPhrases.forEach(phrase => {
-                                    filteredContent = filteredContent.replace(phrase, '');
+                                    status: 'error',
+                                    message: `Step ${currentStep}/${totalSteps}: Error executing ${toolCall?.tool || 'tool'}: ${error.message}`,
+                                    stepInfo: { currentStep, totalSteps, toolIndex: i + 1, totalTools: toolMatches.length }
                                 });
-                                
-                                filteredContent = filteredContent.trim();
-                                
-                                if (filteredContent) {
-                                    port.postMessage({
-                                        type: 'delta',
-                                        content: filteredContent,
-                                        role: 'assistant'
-                                    });
-                                }
+                            } catch (e) {
+                                console.warn('Error sending tool error notification:', e);
+                                isConnected = false;
                             }
-                        } catch (error) {
-                            console.error('Error in follow-up processing:', error);
                         }
-                    };
-                    
-                    // Send follow-up request to AI
-                    if (client instanceof AzureOpenAIClient) {
-                        const followUpMessages = [
-                            { role: 'system', content: systemMessage },
-                            { role: 'user', content: followUpMessage }
-                        ];
-                        await client.sendMessage({ messages: followUpMessages }, followUpProcessor);
-                    } else {
-                        await client.sendMessage(followUpMessage, followUpProcessor, systemMessage);
+                        
+                        // Stop execution on error
+                        break;
                     }
-                    
-                } catch (error) {
-                    console.error('Error in follow-up conversation:', error);
-                    port.postMessage({ error: 'Error processing tool results: ' + error.message });
                 }
+                
+                console.log('Sequential tool execution completed. Final context:', executionContext);
             }
 
             // Helper function for tool execution messages
@@ -1169,6 +1061,27 @@ Please provide a professional, informative response based on the actual search r
                     generateTool: {
                         executing: 'Generating tool...',
                         completed: 'Tool generated'
+                    },
+                    // Stagehand tools
+                    stagehandNavigate: {
+                        executing: 'Navigating to URL...',
+                        completed: 'Navigation completed'
+                    },
+                    stagehandAct: {
+                        executing: 'Performing action...',
+                        completed: 'Action completed'
+                    },
+                    stagehandExtract: {
+                        executing: 'Extracting page content...',
+                        completed: 'Content extracted'
+                    },
+                    stagehandObserve: {
+                        executing: 'Observing page elements...',
+                        completed: 'Elements observed'
+                    },
+                    screenshot: {
+                        executing: 'Taking screenshot...',
+                        completed: 'Screenshot captured'
                     }
                 };
                 
@@ -1182,22 +1095,25 @@ Please provide a professional, informative response based on the actual search r
                     { role: 'system', content: enhancedSystemMessage },
                     { role: 'user', content: message.message }
                 ];
-                
-                await client.sendMessage(
-                    { messages: azureMessages }, 
-                    processStreamChunk
-                );
+                console.log('Azure streaming messages:', JSON.stringify({
+                    system: azureMessages[0].content.length + ' chars',
+                    user: azureMessages[1].content 
+                }));
+                await client.sendMessage({ messages: azureMessages }, processStreamChunk);
             } else {
                 console.log('Starting Claude streaming...');
-                await client.sendMessage(
-                    message.message,
-                    processStreamChunk,
-                    enhancedSystemMessage
-                );
+                await client.sendMessage(message.message, processStreamChunk, enhancedSystemMessage);
             }
             
             console.log('AI processing completed for message');
-            port.postMessage({ done: true });
+            if (isConnected) {
+                try {
+                    port.postMessage({ done: true });
+                } catch (e) {
+                    console.warn('Error sending final done signal:', e);
+                    isConnected = false;
+                }
+            }
             
         } catch (error) {
             console.error('Error in message processing:', error);
@@ -1208,7 +1124,16 @@ Please provide a professional, informative response based on the actual search r
                 isConnected = false;
             }
             
-            port.postMessage({ error: errorMessage });
+            if (isConnected) {
+                try {
+                    port.postMessage({ error: errorMessage });
+                } catch (e) {
+                    console.warn('Error sending final error message:', e);
+                    isConnected = false;
+                }
+            } else {
+                console.warn("Port disconnected, cannot send final error message to UI.");
+            }
         }
     });
 });
@@ -1226,6 +1151,19 @@ async function executeToolCall(toolCall) {
             return await executeGetPageContent(args);
         case 'generateTool':
             return await executeGenerateTool(args);
+        
+        // Stagehand tools
+        case 'stagehandNavigate':
+            return await executeStagehandNavigate(args);
+        case 'stagehandAct':
+            return await executeStagehandAct(args);
+        case 'stagehandExtract':
+            return await executeStagehandExtract(args);
+        case 'stagehandObserve':
+            return await executeStagehandObserve(args);
+        case 'screenshot':
+            return await executeScreenshot(args);
+            
         default:
             throw new Error(`Unknown tool: ${tool}`);
     }
@@ -1614,47 +1552,544 @@ async function executeGenerateTool(args) {
     };
 }
 
+// Stagehand tool implementations
+async function executeStagehandNavigate(args) {
+    const { url } = args;
+    
+    console.log('Stagehand Navigate:', { url });
+    
+    try {
+        // Get the active tab or create a new one
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        let targetTabId;
+        
+        if (tabs.length > 0) {
+            targetTabId = tabs[0].id;
+            await chrome.tabs.update(targetTabId, { url });
+        } else {
+            const tab = await chrome.tabs.create({ url });
+            targetTabId = tab.id;
+        }
+        
+        // Wait for the page to load
+        await new Promise((resolve, reject) => {
+            const maxWaitTime = 15000; // 15 seconds timeout
+            const startTime = Date.now();
+            
+            const checkLoading = () => {
+                const elapsed = Date.now() - startTime;
+                
+                if (elapsed > maxWaitTime) {
+                    console.log(`Navigation timeout after ${elapsed}ms, continuing anyway...`);
+                    resolve();
+                    return;
+                }
+                
+                chrome.tabs.get(targetTabId, (tab) => {
+                    if (chrome.runtime.lastError) {
+                        console.log('Tab no longer exists, continuing anyway...');
+                        resolve();
+                        return;
+                    }
+                    
+                    if (tab.status === 'complete') {
+                        console.log(`Navigation completed after ${elapsed}ms`);
+                        resolve();
+                    } else {
+                        setTimeout(checkLoading, 500);
+                    }
+                });
+            };
+            
+            setTimeout(checkLoading, 1000);
+        });
+        
+        return {
+            success: true,
+            tabId: targetTabId,
+            url,
+            message: `Successfully navigated to: ${url}`
+        };
+    } catch (error) {
+        console.error('Stagehand navigation error:', error);
+        throw new Error(`Navigation failed: ${error.message}`);
+    }
+}
+
+async function executeStagehandAct(args) {
+    const { action, variables } = args;
+    
+    console.log('Stagehand Act:', { action, variables });
+    
+    try {
+        // Get the active tab
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0) {
+            throw new Error('No active tab found');
+        }
+        
+        const targetTabId = tabs[0].id;
+        
+        // Execute the action using content script injection
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: targetTabId },
+            func: performStagehandAction,
+            args: [action, variables || {}]
+        });
+        
+        const result = results[0].result;
+        
+        if (result.success) {
+            return {
+                success: true,
+                action,
+                variables,
+                result: result.data,
+                message: `Action performed: ${action}`
+            };
+        } else {
+            throw new Error(result.error || 'Action failed');
+        }
+    } catch (error) {
+        console.error('Stagehand action error:', error);
+        throw new Error(`Action failed: ${error.message}`);
+    }
+}
+
+async function executeStagehandExtract(args) {
+    console.log('Stagehand Extract');
+    
+    try {
+        // Get the active tab
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0) {
+            throw new Error('No active tab found');
+        }
+        
+        const targetTabId = tabs[0].id;
+        
+        // Extract content using content script
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: targetTabId },
+            func: extractPageContent
+        });
+        
+        const content = results[0].result;
+        
+        return {
+            success: true,
+            content,
+            length: content.length,
+            message: `Extracted ${content.length} characters of content`
+        };
+    } catch (error) {
+        console.error('Stagehand extraction error:', error);
+        throw new Error(`Content extraction failed: ${error.message}`);
+    }
+}
+
+async function executeStagehandObserve(args) {
+    const { instruction } = args;
+    
+    console.log('Stagehand Observe:', { instruction });
+    
+    try {
+        // Get the active tab
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0) {
+            throw new Error('No active tab found');
+        }
+        
+        const targetTabId = tabs[0].id;
+        
+        // Observe elements using content script
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: targetTabId },
+            func: observeElements,
+            args: [instruction]
+        });
+        
+        const observations = results[0].result;
+        
+        return {
+            success: true,
+            instruction,
+            observations,
+            count: observations.length,
+            message: `Found ${observations.length} elements matching: ${instruction}`
+        };
+    } catch (error) {
+        console.error('Stagehand observation error:', error);
+        throw new Error(`Observation failed: ${error.message}`);
+    }
+}
+
+async function executeScreenshot(args) {
+    console.log('Taking screenshot');
+    
+    try {
+        // Get the active tab
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0) {
+            throw new Error('No active tab found');
+        }
+        
+        const targetTabId = tabs[0].id;
+        
+        // Take screenshot
+        const screenshotDataUrl = await chrome.tabs.captureVisibleTab(null, {
+            format: 'png',
+            quality: 90
+        });
+        
+        // Convert data URL to base64
+        const base64Data = screenshotDataUrl.split(',')[1];
+        
+        // Generate filename
+        const timestamp = new Date().toISOString().replace(/:/g, '-');
+        const filename = `screenshot-${timestamp}.png`;
+        
+        return {
+            success: true,
+            filename,
+            dataUrl: screenshotDataUrl,
+            base64: base64Data,
+            tabId: targetTabId,
+            message: `Screenshot taken: ${filename}`
+        };
+    } catch (error) {
+        console.error('Screenshot error:', error);
+        throw new Error(`Screenshot failed: ${error.message}`);
+    }
+}
+
+// Content script functions to be injected
+function performStagehandAction(action, variables) {
+    try {
+        console.log('Performing action:', action, 'with variables:', variables);
+        
+        // Parse the action to determine what to do
+        const actionLower = action.toLowerCase();
+        
+        // Handle click actions
+        if (actionLower.includes('click')) {
+            const element = findElementByAction(action);
+            if (element) {
+                element.click();
+                return { success: true, data: `Clicked element: ${element.tagName}` };
+            } else {
+                return { success: false, error: `Could not find element to click for: ${action}` };
+            }
+        }
+        
+        // Handle type/input actions
+        if (actionLower.includes('type') || actionLower.includes('enter') || actionLower.includes('input')) {
+            const element = findElementByAction(action);
+            if (element && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA')) {
+                // Extract text to type from action or variables
+                let textToType = '';
+                
+                // Check if variables contain the text
+                if (variables && Object.keys(variables).length > 0) {
+                    textToType = Object.values(variables)[0];
+                } else {
+                    // Extract text from action (e.g., "Type 'hello world' into search box")
+                    const matches = action.match(/'([^']+)'/);
+                    if (matches) {
+                        textToType = matches[1];
+                    }
+                }
+                
+                if (textToType) {
+                    element.value = textToType;
+                    element.dispatchEvent(new Event('input', { bubbles: true }));
+                    element.dispatchEvent(new Event('change', { bubbles: true }));
+                    return { success: true, data: `Typed "${textToType}" into ${element.tagName}` };
+                } else {
+                    return { success: false, error: `No text found to type for action: ${action}` };
+                }
+            } else {
+                return { success: false, error: `Could not find input element for: ${action}` };
+            }
+        }
+        
+        // Handle scroll actions
+        if (actionLower.includes('scroll')) {
+            if (actionLower.includes('down')) {
+                window.scrollBy(0, 500);
+            } else if (actionLower.includes('up')) {
+                window.scrollBy(0, -500);
+            } else {
+                window.scrollBy(0, 300);
+            }
+            return { success: true, data: 'Scrolled page' };
+        }
+        
+        return { success: false, error: `Unsupported action: ${action}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+function findElementByAction(action) {
+    const actionLower = action.toLowerCase();
+    
+    // Common selectors based on action text
+    const selectors = [
+        // Buttons
+        'button', 'input[type="button"]', 'input[type="submit"]', '[role="button"]',
+        // Links
+        'a', '[role="link"]',
+        // Inputs
+        'input', 'textarea', 'select',
+        // Interactive elements
+        '[onclick]', '[tabindex]'
+    ];
+    
+    // Try to find element by text content
+    for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector);
+        for (const element of elements) {
+            const text = element.textContent || element.value || element.placeholder || element.title || '';
+            if (text.toLowerCase().includes(getKeywordFromAction(actionLower))) {
+                return element;
+            }
+        }
+    }
+    
+    // Fallback: try common element types
+    if (actionLower.includes('search')) {
+        return document.querySelector('input[type="search"], input[name*="search"], input[placeholder*="search"], input[id*="search"]');
+    }
+    
+    if (actionLower.includes('login') || actionLower.includes('sign in')) {
+        return document.querySelector('button[type="submit"], input[type="submit"], button:contains("login"), button:contains("sign in")');
+    }
+    
+    return null;
+}
+
+function getKeywordFromAction(action) {
+    // Extract key words from action
+    const keywords = ['search', 'login', 'sign in', 'submit', 'send', 'go', 'enter', 'click', 'button'];
+    for (const keyword of keywords) {
+        if (action.includes(keyword)) {
+            return keyword;
+        }
+    }
+    return '';
+}
+
+function extractPageContent() {
+    try {
+        const bodyText = document.body.innerText || document.body.textContent || '';
+        
+        // Clean up the content similar to the original implementation
+        const content = bodyText
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => {
+                if (!line) return false;
+                
+                // Filter out CSS and JavaScript content
+                if (
+                    (line.includes('{') && line.includes('}')) ||
+                    line.includes('@keyframes') ||
+                    line.match(/^\.[a-zA-Z0-9_-]+\s*{/) ||
+                    line.match(/^[a-zA-Z-]+:[a-zA-Z0-9%\s\(\)\.,-]+;$/)
+                ) {
+                    return false;
+                }
+                return true;
+            })
+            .map(line => {
+                // Decode unicode characters
+                return line.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+                    String.fromCharCode(parseInt(hex, 16))
+                );
+            })
+            .join('\n');
+        
+        return content;
+    } catch (error) {
+        return `Error extracting content: ${error.message}`;
+    }
+}
+
+function observeElements(instruction) {
+    try {
+        console.log('Observing elements for:', instruction);
+        
+        const instructionLower = instruction.toLowerCase();
+        const observations = [];
+        
+        // Get all interactive elements
+        const selectors = [
+            'button', 'input', 'textarea', 'select', 'a', '[role="button"]', 
+            '[role="link"]', '[onclick]', '[tabindex]', 'form'
+        ];
+        
+        for (const selector of selectors) {
+            const elements = document.querySelectorAll(selector);
+            for (const element of elements) {
+                const text = element.textContent || element.value || element.placeholder || element.title || '';
+                const tagName = element.tagName.toLowerCase();
+                const className = element.className || '';
+                const id = element.id || '';
+                
+                // Check if element matches the instruction
+                if (
+                    text.toLowerCase().includes(instructionLower) ||
+                    className.toLowerCase().includes(instructionLower) ||
+                    id.toLowerCase().includes(instructionLower) ||
+                    (instructionLower.includes(tagName))
+                ) {
+                    observations.push({
+                        tagName,
+                        text: text.substring(0, 100), // Limit text length
+                        className,
+                        id,
+                        type: element.type || '',
+                        placeholder: element.placeholder || '',
+                        href: element.href || '',
+                        visible: element.offsetParent !== null
+                    });
+                }
+            }
+        }
+        
+        return observations.slice(0, 10); // Limit to 10 observations
+    } catch (error) {
+        return [{ error: error.message }];
+    }
+}
+
 // Update the system message to include orchestrator capabilities
 const getSystemMessage = (context) => {
-    return `You are XatBrowser AI, a professional AI assistant with advanced browser automation capabilities.
+    return `You are XatBrowser AI, an advanced AI assistant with sequential thinking capabilities and powerful browser automation tools.
 
-CRITICAL TOOL EXECUTION RULES:
-1. When users ask for current information, news, or data that requires web search, you MUST execute tools immediately
-2. Use EXACT JSON format for tool calls: {"tool": "toolName", "args": {"param": "value"}}
-3. Do NOT explain what you're going to do - just execute the tools
-4. After tool execution completes, provide a comprehensive response based on the results
+SEQUENTIAL THINKING PROTOCOL:
+You MUST use sequential thinking for complex requests. Follow this exact format:
+
+[THINKING:1/3]
+Let me break down this request:
+1. User wants me to [analyze the request]
+2. I need to [identify required tools]
+3. My plan: [step by step plan]
+[/THINKING]
+
+[THINKING:2/3]
+Now I'll execute the first tool: [tool name]
+{"tool": "toolName", "args": {"param": "value"}}
+[/THINKING]
+
+[After tool execution, continue thinking...]
+[THINKING:3/3]
+Based on the results, I now need to [next step or final response]
+[/THINKING]
 
 AVAILABLE TOOLS:
-- searchWeb(query, tabId?) - Search the web using Google
-- getPageContent(tabId?) - Extract content from a web page (automatically called after search)
-- openNewTab(url) - Open new browser tabs
-- generateTool(description, name?) - Create specialized tools
 
-TOOL EXECUTION EXAMPLES:
-User: "What are the latest tax news in USA?"
-Response: {"tool": "searchWeb", "args": {"query": "latest tax news USA 2024"}}
+BASIC BROWSER TOOLS:
+- openNewTab(url) - Opens a new browser tab (returns tabId for subsequent operations)
+- searchWeb(query, tabId?) - Searches the web using Google (tabId auto-injected if available)
+- getPageContent(tabId?) - Extracts content from a web page (tabId auto-injected if available)
 
-User: "Open Google"
-Response: {"tool": "openNewTab", "args": {"url": "https://google.com"}}
+ADVANCED STAGEHAND TOOLS:
+- stagehandNavigate(url) - Navigate to a URL in the browser. Use with confident URLs or start with https://google.com
+- stagehandAct(action, variables?) - Performs atomic actions on web elements (click, type, etc.)
+- stagehandExtract() - Extracts all text content from the current page
+- stagehandObserve(instruction) - Observes specific elements on the page for interaction
+- screenshot() - Takes a screenshot of the current page
 
-RESPONSE FORMATTING RULES:
-1. Use markdown formatting for better readability
-2. Use **bold** for important points and headlines
-3. Use ### for section headers
-4. Use bullet points (-) for lists
-5. Use numbered lists when showing steps or rankings
-6. Include relevant URLs when available
+TOOL EXECUTION RULES:
+1. Use EXACT JSON format: {"tool": "toolName", "args": {"param": "value"}}
+2. Execute tools within THINKING blocks
+3. Wait for tool results before continuing
+4. Tab IDs are automatically passed between tools - you don't need to specify tabId manually
+5. Use results to inform next steps
 
-IMPORTANT: 
-- Execute tools FIRST when users request current information
-- Do NOT say "I'll search for..." or "Let me search..." - just execute the tool
-- After tools complete, provide comprehensive responses with actual data
-- Format responses professionally with proper markdown
+CONTEXT AWARENESS:
+- When you open a new tab, that tab becomes the active context
+- Subsequent tools (searchWeb, getPageContent, etc.) automatically use the current tab
+- You can focus on the task logic rather than tab management
+
+INTELLIGENT SEARCH WORKFLOW:
+For search requests, follow this pattern:
+1. Use searchWeb to perform the search (this will automatically open Google and search)
+2. Use getPageContent to extract and analyze the search results
+3. Provide a comprehensive answer based on the extracted information
+
+CORRECTED EXAMPLES:
+
+Example 1 - Simple Search:
+User: "Search for today's top news"
+
+[THINKING:1/2]
+User wants me to search for today's top news.
+My plan:
+1. Search for "today's top news" 
+2. Extract and analyze the search results
+3. Provide a summary of the top news
+[/THINKING]
+
+[THINKING:2/2]
+Step 1: Search for today's top news
+{"tool": "searchWeb", "args": {"query": "today's top news"}}
+
+Step 2: Extract and analyze the search results
+{"tool": "getPageContent", "args": {}}
+[/THINKING]
+
+Based on the search results, here are today's top news stories...
+
+Example 2 - Open Tab and Search:
+User: "Open a new tab and search for AI news"
+
+[THINKING:1/3]
+User wants me to open a new tab and search for AI news.
+My plan:
+1. Open a new tab with Google
+2. Search for "AI news" (will use the same tab)
+3. Extract and analyze results
+[/THINKING]
+
+[THINKING:2/3]
+Step 1: Open new tab with Google
+{"tool": "openNewTab", "args": {"url": "https://google.com"}}
+[/THINKING]
+
+[THINKING:3/3]
+Step 2: Search for AI news (using the opened tab)
+{"tool": "searchWeb", "args": {"query": "AI news"}}
+
+Step 3: Extract and analyze the search results
+{"tool": "getPageContent", "args": {}}
+[/THINKING]
+
+Here's what I found about AI news...
+
+STAGEHAND TOOL GUIDELINES:
+- stagehandAct: Use atomic actions like "Click the login button" or "Type 'hello' in search box"
+- stagehandObserve: Use before acting to find elements, e.g., "find the submit button"
+- stagehandExtract: Use for getting all page text content
+- screenshot: Use when you need to see the current page state
+
+CRITICAL RULES:
+1. ALWAYS use sequential thinking for multi-step requests
+2. Execute tools in logical order
+3. Tab context is automatically maintained between tools
+4. Don't manually specify tabId unless targeting a specific different tab
+5. Use stagehandObserve before stagehandAct when unsure about elements
+6. Take screenshots when you need to see page state
+7. Use atomic actions in stagehandAct
+8. ALWAYS extract and analyze search results to provide intelligent answers
+9. Provide comprehensive responses based on actual search data
 
 Current browser context:
 ${context}
 
-Remember: Execute tools immediately for current information requests, then provide detailed responses based on actual results.`;
+Remember: Think sequentially, use appropriate tools for each task, let the system handle tab context automatically, and always provide intelligent analysis of search results rather than just confirming the search was performed.`;
 };
 
 // Update the message handling to use the new system message

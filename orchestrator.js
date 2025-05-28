@@ -160,6 +160,143 @@ class ToolOrchestrator {
             },
             implementation: this.generateToolImpl.bind(this)
         });
+
+        // Stagehand Navigation Tool
+        this.registerTool({
+            type: "function",
+            name: "stagehandNavigate",
+            displayTitle: "Navigate to URL",
+            wouldLikeTo: "navigate to {{{ url }}}",
+            isCurrently: "navigating to {{{ url }}}",
+            hasAlready: "navigated to {{{ url }}}",
+            group: "navigation",
+            readonly: false,
+            isInstant: false,
+            requiresConfirmation: false,
+            function: {
+                name: "stagehandNavigate",
+                description: "Navigate to a URL in the browser",
+                parameters: {
+                    type: "object",
+                    required: ["url"],
+                    properties: {
+                        url: {
+                            type: "string",
+                            description: "The URL to navigate to"
+                        }
+                    }
+                }
+            },
+            implementation: this.stagehandNavigateImpl.bind(this)
+        });
+
+        // Stagehand Action Tool
+        this.registerTool({
+            type: "function",
+            name: "stagehandAct",
+            displayTitle: "Perform Action",
+            wouldLikeTo: "perform action: {{{ action }}}",
+            isCurrently: "performing action: {{{ action }}}",
+            hasAlready: "completed action: {{{ action }}}",
+            group: "interaction",
+            readonly: false,
+            isInstant: false,
+            requiresConfirmation: false,
+            function: {
+                name: "stagehandAct",
+                description: "Performs an action on a web page element",
+                parameters: {
+                    type: "object",
+                    required: ["action"],
+                    properties: {
+                        action: {
+                            type: "string",
+                            description: "The action to perform (e.g., 'Click the login button')"
+                        },
+                        variables: {
+                            type: "object",
+                            description: "Variables used in the action template"
+                        }
+                    }
+                }
+            },
+            implementation: this.stagehandActImpl.bind(this)
+        });
+
+        // Stagehand Extract Tool
+        this.registerTool({
+            type: "function",
+            name: "stagehandExtract",
+            displayTitle: "Extract Content",
+            wouldLikeTo: "extract all text from the current page",
+            isCurrently: "extracting page content",
+            hasAlready: "extracted page content",
+            group: "analysis",
+            readonly: true,
+            isInstant: true,
+            requiresConfirmation: false,
+            function: {
+                name: "stagehandExtract",
+                description: "Extracts all text content from the current page",
+                parameters: {
+                    type: "object",
+                    properties: {}
+                }
+            },
+            implementation: this.stagehandExtractImpl.bind(this)
+        });
+
+        // Stagehand Observe Tool
+        this.registerTool({
+            type: "function",
+            name: "stagehandObserve",
+            displayTitle: "Observe Elements",
+            wouldLikeTo: "observe elements: {{{ instruction }}}",
+            isCurrently: "observing elements: {{{ instruction }}}",
+            hasAlready: "observed elements: {{{ instruction }}}",
+            group: "analysis",
+            readonly: true,
+            isInstant: true,
+            requiresConfirmation: false,
+            function: {
+                name: "stagehandObserve",
+                description: "Observes elements on the web page",
+                parameters: {
+                    type: "object",
+                    required: ["instruction"],
+                    properties: {
+                        instruction: {
+                            type: "string",
+                            description: "Instruction for observation (e.g., 'find the login button')"
+                        }
+                    }
+                }
+            },
+            implementation: this.stagehandObserveImpl.bind(this)
+        });
+
+        // Screenshot Tool
+        this.registerTool({
+            type: "function",
+            name: "screenshot",
+            displayTitle: "Take Screenshot",
+            wouldLikeTo: "take a screenshot of the current page",
+            isCurrently: "taking screenshot",
+            hasAlready: "captured screenshot",
+            group: "analysis",
+            readonly: true,
+            isInstant: true,
+            requiresConfirmation: false,
+            function: {
+                name: "screenshot",
+                description: "Takes a screenshot of the current page",
+                parameters: {
+                    type: "object",
+                    properties: {}
+                }
+            },
+            implementation: this.screenshotImpl.bind(this)
+        });
     }
 
     /**
@@ -524,6 +661,101 @@ class ToolOrchestrator {
                 // Generated tool implementation would go here
                 return { success: true, message: "Generated tool executed" };
             }
+        };
+    }
+
+    // Stagehand tool implementations
+    async stagehandNavigateImpl(args, extras) {
+        const { url } = args;
+        
+        extras.onProgress?.({ message: `Navigating to: ${url}` });
+        
+        const result = await chrome.runtime.sendMessage({
+            type: 'EXECUTE_TOOL',
+            tool: 'stagehandNavigate',
+            args: { url }
+        });
+        
+        return {
+            success: true,
+            url,
+            tabId: result.tabId,
+            timestamp: Date.now()
+        };
+    }
+
+    async stagehandActImpl(args, extras) {
+        const { action, variables } = args;
+        
+        extras.onProgress?.({ message: `Performing: ${action}` });
+        
+        const result = await chrome.runtime.sendMessage({
+            type: 'EXECUTE_TOOL',
+            tool: 'stagehandAct',
+            args: { action, variables }
+        });
+        
+        return {
+            success: true,
+            action,
+            variables,
+            result: result.result,
+            timestamp: Date.now()
+        };
+    }
+
+    async stagehandExtractImpl(args, extras) {
+        extras.onProgress?.({ message: 'Extracting page content...' });
+        
+        const result = await chrome.runtime.sendMessage({
+            type: 'EXECUTE_TOOL',
+            tool: 'stagehandExtract',
+            args: {}
+        });
+        
+        return {
+            success: true,
+            content: result.content,
+            length: result.length,
+            timestamp: Date.now()
+        };
+    }
+
+    async stagehandObserveImpl(args, extras) {
+        const { instruction } = args;
+        
+        extras.onProgress?.({ message: `Observing: ${instruction}` });
+        
+        const result = await chrome.runtime.sendMessage({
+            type: 'EXECUTE_TOOL',
+            tool: 'stagehandObserve',
+            args: { instruction }
+        });
+        
+        return {
+            success: true,
+            instruction,
+            observations: result.observations,
+            count: result.count,
+            timestamp: Date.now()
+        };
+    }
+
+    async screenshotImpl(args, extras) {
+        extras.onProgress?.({ message: 'Taking screenshot...' });
+        
+        const result = await chrome.runtime.sendMessage({
+            type: 'EXECUTE_TOOL',
+            tool: 'screenshot',
+            args: {}
+        });
+        
+        return {
+            success: true,
+            filename: result.filename,
+            dataUrl: result.dataUrl,
+            base64: result.base64,
+            timestamp: Date.now()
         };
     }
 

@@ -6,7 +6,10 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
 
     class EnhancedSidebarUI {
         constructor() {
-            this.isOpen = false; // Start hidden by default
+            this.isInitialized = false;
+            this.isContextValid = true; // Track context validity
+            this.currentDomain = this.getCurrentDomain();
+            this.isOpen = false;
             this.isMinimized = false;
             this.isProcessing = false;
             this.currentStreamingMessage = null;
@@ -14,9 +17,29 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
             this.activeExecutions = new Map();
             this.executionHistory = [];
             this.isResizing = false;
-            this.currentDomain = this.getCurrentDomain();
             this.currentToolIndicator = null;
             
+            // Check context validity before initialization
+            if (!isExtensionContextValid()) {
+                console.warn('Extension context invalid during sidebar initialization');
+                this.isContextValid = false;
+                return;
+            }
+
+            this.initializeUIState();
+            this.initializeOrchestrator();
+            this.initializeElements();
+            this.assembleSidebar();
+            this.attachEventListeners();
+            this.loadConfig();
+            this.loadPosition();
+            this.loadSidebarState();
+            
+            this.isInitialized = true;
+            console.log('Enhanced sidebar initialized for domain:', this.currentDomain);
+        }
+
+        initializeUIState() {
             // Prevent multiple instances
             if (document.getElementById('xatbrowser-enhanced-sidebar-container')) {
                 console.log('Enhanced sidebar container already exists, removing old one...');
@@ -31,39 +54,14 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
             if (!document.body.contains(this.container)) {
                 document.body.appendChild(this.container);
             }
-            
-            this.initializeOrchestrator();
-            this.initializeElements();
-            this.attachEventListeners();
-            this.loadConfig();
-            this.loadPosition();
-            this.loadSidebarState();
-            
-            // Ensure UI is properly initialized
-            setTimeout(() => {
-                this.initializeUIState();
-            }, 100);
-        }
-
-        initializeUIState() {
-            // Ensure input elements are enabled by default
-            if (this.messageInput) {
-                this.messageInput.disabled = false;
-                this.messageInput.focus();
-            }
-            if (this.modelSelector) {
-                this.modelSelector.disabled = false;
-            }
-            if (this.sendButton) {
-                this.updateSendButtonState();
-            }
         }
 
         getCurrentDomain() {
             try {
-                return new URL(window.location.href).hostname;
-            } catch (error) {
                 return window.location.hostname || 'unknown';
+            } catch (error) {
+                console.error('Error getting domain:', error);
+                return 'unknown';
             }
         }
 
@@ -1042,7 +1040,7 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
         }
 
         constrainToViewport() {
-            if (this.isMinimized) return;
+            if (this.isMinimized || !this.isContextValid) return;
             
             const rect = this.sidebar.getBoundingClientRect();
             let newX = rect.left;
@@ -1094,13 +1092,15 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
             }, 300);
 
             // Save minimized state for this domain
-            const domain = this.getCurrentDomain();
-            safeChromeCaller(() => {
-                chrome.storage.local.set({ 
-                    [`sidebarOpen_${domain}`]: false,
-                    [`sidebarMinimized_${domain}`]: true 
+            if (this.isContextValid) {
+                const domain = this.getCurrentDomain();
+                safeChromeCaller(() => {
+                    chrome.storage.local.set({ 
+                        [`sidebarOpen_${domain}`]: false,
+                        [`sidebarMinimized_${domain}`]: true 
+                    });
                 });
-            });
+            }
         }
 
         restoreSidebar() {
@@ -1132,13 +1132,15 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
             }, 200);
 
             // Save restored state for this domain
-            const domain = this.getCurrentDomain();
-            safeChromeCaller(() => {
-                chrome.storage.local.set({ 
-                    [`sidebarOpen_${domain}`]: true,
-                    [`sidebarMinimized_${domain}`]: false 
+            if (this.isContextValid) {
+                const domain = this.getCurrentDomain();
+                safeChromeCaller(() => {
+                    chrome.storage.local.set({ 
+                        [`sidebarOpen_${domain}`]: true,
+                        [`sidebarMinimized_${domain}`]: false 
+                    });
                 });
-            });
+            }
         }
 
         // Tool execution handlers with improved feedback
@@ -1364,7 +1366,7 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
             }
 
             // Check if extension context is still valid
-            if (!isExtensionContextValid()) {
+            if (!this.isContextValid || !isExtensionContextValid()) {
                 this.handleContextInvalidation();
                 return;
             }
@@ -1665,6 +1667,11 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
         }
 
         async loadConfig() {
+            if (!this.isContextValid) {
+                console.log('Context invalid, skipping config load');
+                return;
+            }
+            
             try {
                 const response = await safeChromeCaller(() => {
                     return chrome.runtime.sendMessage({ type: 'GET_CONFIG' });
@@ -1837,6 +1844,11 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
         }
 
         savePosition() {
+            if (!this.isContextValid) {
+                console.log('Context invalid, skipping position save');
+                return;
+            }
+            
             safeChromeCaller(() => {
                 const rect = this.sidebar.getBoundingClientRect();
                 chrome.storage.local.set({
@@ -1934,6 +1946,9 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
         handleContextInvalidation() {
             console.log('Extension context invalidated - cleaning up enhanced sidebar');
             
+            // Set context as invalid to prevent further operations
+            this.isContextValid = false;
+            
             // Show user-friendly message
             this.showNotification('Extension was updated. Please refresh the page to continue using XatBrowser AI.');
             
@@ -1993,13 +2008,17 @@ if (typeof window.xatBrowserEnhancedSidebarLoaded !== 'undefined') {
         }
     }
 
-    // Initialize the enhanced sidebar
-    window.xatBrowserEnhancedSidebar = new EnhancedSidebarUI();
+    // Initialize the enhanced sidebar only if context is valid
+    if (isExtensionContextValid()) {
+        window.xatBrowserEnhancedSidebar = new EnhancedSidebarUI();
 
-    // Notify background script safely
-    safeChromeCaller(() => {
-        chrome.runtime.sendMessage({ type: 'SIDEBAR_READY' });
-    });
+        // Notify background script safely
+        safeChromeCaller(() => {
+            chrome.runtime.sendMessage({ type: 'SIDEBAR_READY' });
+        });
+    } else {
+        console.warn('Extension context invalid, skipping sidebar initialization');
+    }
 }
 
 // Utility function to check if extension context is valid
@@ -2023,7 +2042,9 @@ function safeChromeCaller(apiCall, fallback = null) {
         console.error('Chrome API call failed:', error);
         if (error.message && error.message.includes('Extension context invalidated')) {
             // Trigger context invalidation handler if available
-            if (window.xatBrowserEnhancedSidebar && typeof window.xatBrowserEnhancedSidebar.handleContextInvalidation === 'function') {
+            if (window.xatBrowserEnhancedSidebar && 
+                typeof window.xatBrowserEnhancedSidebar.handleContextInvalidation === 'function' &&
+                window.xatBrowserEnhancedSidebar.isContextValid) {
                 window.xatBrowserEnhancedSidebar.handleContextInvalidation();
             }
         }
