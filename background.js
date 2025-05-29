@@ -1,5 +1,23 @@
 import { AzureOpenAIClient, ClaudeClient } from './aiClients.js';
 
+// Global execution context to maintain state across thinking steps
+let globalExecutionContext = {
+    currentTabId: null,
+    lastSearchTabId: null,
+    variables: {},
+    sessionId: null
+};
+
+// Reset global context when starting a new conversation
+function resetGlobalContext() {
+    globalExecutionContext = {
+        currentTabId: null,
+        lastSearchTabId: null,
+        variables: {},
+        sessionId: Date.now().toString()
+    };
+}
+
 // Handle extension installation
 chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
@@ -707,6 +725,13 @@ chrome.runtime.onConnect.addListener((port) => {
         }
 
         try {
+            // Reset global context for new conversation if needed
+            if (!globalExecutionContext.sessionId || globalExecutionContext.sessionId !== message.sessionId) {
+                console.log('Starting new session, resetting global context');
+                resetGlobalContext();
+                globalExecutionContext.sessionId = message.sessionId || Date.now().toString();
+            }
+            
             const config = await getConfig();
             let modelConfig = null;
             let client = null;
@@ -765,7 +790,7 @@ Use this context when relevant to the user's request.`;
             }
 
             // Enhanced streaming callback with sequential thinking and tool execution detection
-            const processStreamChunk = (chunk) => {
+            const processStreamChunk = async (chunk) => {
                 try {
                     if (!isConnected) {
                         console.warn("processStreamChunk: Port disconnected, cannot send chunk.");
@@ -843,13 +868,81 @@ Use this context when relevant to the user's request.`;
                                     }
                                     
                                     // Look for tool calls within thinking content
-                                    const toolMatches = thinkingContent.match(/\{"tool":\s*"([^"]+)",\s*"args":\s*\{[^}]*\}\}/g);
+                                    console.log('=== TOOL DETECTION DEBUG ===');
+                                    console.log('Raw thinking content:', JSON.stringify(thinkingContent));
                                     
+                                    // Enhanced tool detection with multiple strategies
+                                    let toolMatches = null;
+                                    let detectionMethod = 'none';
+                                    
+                                    // Strategy 1: Standard JSON tool format
+                                    toolMatches = thinkingContent.match(/\{"tool":\s*"[^"]+",\s*"args":\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\}/g);
                                     if (toolMatches) {
-                                        console.log('Found tools in thinking block:', toolMatches);
+                                        detectionMethod = 'regex-standard';
+                                        console.log('✅ Found tools with standard regex:', toolMatches);
+                                    }
+                                    
+                                    // Strategy 2: Simpler regex for basic cases
+                                    if (!toolMatches) {
+                                        toolMatches = thinkingContent.match(/\{"tool":\s*"[^"]+",\s*"args":\s*\{.*?\}\}/g);
+                                        if (toolMatches) {
+                                            detectionMethod = 'regex-simple';
+                                            console.log('✅ Found tools with simple regex:', toolMatches);
+                                        }
+                                    }
+                                    
+                                    // Strategy 3: Line-by-line parsing
+                                    if (!toolMatches) {
+                                        console.log('❌ Regex failed, trying line-by-line parsing...');
+                                        const lines = thinkingContent.split('\n');
+                                        const foundTools = [];
                                         
-                                        // Execute tools sequentially
-                                        executeSequentialTools(toolMatches, port, currentStep, totalSteps, isConnected);
+                                        for (let i = 0; i < lines.length; i++) {
+                                            const line = lines[i].trim();
+                                            
+                                            if (line.startsWith('{"tool":') && line.includes('"args":')) {
+                                                console.log(`Potential tool line found: ${line}`);
+                                                try {
+                                                    const parsed = JSON.parse(line);
+                                                    if (parsed.tool && parsed.args) {
+                                                        foundTools.push(line);
+                                                        console.log('✅ Valid tool parsed:', parsed.tool, parsed.args);
+                                                    }
+                                                } catch (e) {
+                                                    console.log('❌ Failed to parse tool line:', e.message);
+                                                }
+                                            }
+                                        }
+                                        
+                                        if (foundTools.length > 0) {
+                                            toolMatches = foundTools;
+                                            detectionMethod = 'line-parsing';
+                                            console.log('✅ Found tools via line parsing:', foundTools);
+                                        }
+                                    }
+                                    
+                                    console.log('=== DETECTION RESULT ===');
+                                    console.log('Method used:', detectionMethod);
+                                    console.log('Tools found:', toolMatches ? toolMatches.length : 0);
+                                    console.log('Tool matches:', toolMatches);
+                                    
+                                    if (toolMatches && toolMatches.length > 0) {
+                                        console.log('🚀 EXECUTING TOOLS:', toolMatches);
+                                        
+                                        // Execute tools sequentially and wait for completion
+                                        try {
+                                            const executionContext = await executeSequentialTools(toolMatches, port, currentStep, totalSteps);
+                                            console.log('✅ Tool execution completed, context:', executionContext);
+                                            
+                                            // Mark that tools were executed for final response generation
+                                            toolsWereExecutedInThisCycle = true;
+                                            if (executionContext && executionContext.allToolResults) {
+                                                accumulatedToolResultsThisCycle.push(...executionContext.allToolResults);
+                                            }
+                                            
+                                        } catch (toolExecutionError) {
+                                            console.error('Error in tool execution:', toolExecutionError);
+                                        }
                                         
                                         // Remove tool JSON from content sent to UI
                                         let filteredThinkingContent = thinkingContent;
@@ -874,6 +967,8 @@ Use this context when relevant to the user's request.`;
                                                 return;
                                             }
                                         }
+                                    } else {
+                                        console.log('❌ NO TOOLS DETECTED');
                                     }
                                 }
                             }
@@ -917,15 +1012,83 @@ Use this context when relevant to the user's request.`;
                 }
             };
             
+            // Helper function to generate final response from tool results
+            const generateFinalResponseFromResults = async (toolResults) => {
+                if (!toolResults || toolResults.length === 0) return;
+                
+                console.log('🎯 Generating final response from tool results...');
+                
+                const finalResponseSystemMessage = getSystemMessage(context) + 
+                    `\n\nTOOL EXECUTION SUMMARY:\n${JSON.stringify(toolResults, null, 2)}` + 
+                    "\n\nTASK: Provide a final, comprehensive answer to the user's original query based *only* on the information from the tool execution summary. Do not attempt to call any more tools. Summarize the findings and directly answer the user.";
+
+                const finalUserPrompt = `Based on the tool execution results (summarized in the system message), please provide the final answer to my original query: "${message.message}"`;
+
+                try {
+                    if (client instanceof AzureOpenAIClient) {
+                        const finalAzureMessages = [
+                            { role: 'system', content: finalResponseSystemMessage },
+                            { role: 'user', content: finalUserPrompt }
+                        ];
+                        await client.sendMessage({ messages: finalAzureMessages }, (finalChunk) => {
+                            if (!isConnected) return;
+                            if (finalChunk.done) {
+                                port.postMessage({ done: true });
+                            } else {
+                                port.postMessage({ type: 'delta', content: finalChunk.content || finalChunk.choices?.[0]?.delta?.content || '', role: 'assistant' });
+                            }
+                        });
+                    } else { // Claude or other
+                        await client.sendMessage(finalUserPrompt, (finalChunk) => {
+                            if (!isConnected) return;
+                            if (finalChunk.done) {
+                                port.postMessage({ done: true });
+                            } else {
+                                port.postMessage({ type: 'delta', content: finalChunk.content || '', role: 'assistant' });
+                            }
+                       }, finalResponseSystemMessage);
+                    }
+                    console.log('Final response streaming initiated and completed.');
+                } catch (finalResponseError) {
+                    console.error("Error streaming final AI response:", finalResponseError);
+                    if (isConnected) {
+                        try {
+                            port.postMessage({ error: 'Error generating final AI response: ' + finalResponseError.message });
+                        } catch (e) {
+                            console.warn('Error sending final response error to port:', e);
+                            isConnected = false;
+                        }
+                    }
+                }
+            };
+
+            // Initialize tool execution tracking
+            let toolsWereExecutedInThisCycle = false;
+            let accumulatedToolResultsThisCycle = [];
+            
             // Sequential tool execution function
             async function executeSequentialTools(toolMatches, port, currentStep, totalSteps) {
                 console.log('Executing sequential tools:', toolMatches.length);
+                console.log('Starting with global context:', globalExecutionContext);
                 
-                // Context to maintain state between tools
+                // Mark that tools are being executed
+                toolsWereExecutedInThisCycle = true;
+                
+                // Use global context but also maintain local context for this execution
                 let executionContext = {
-                    currentTabId: null,
+                    ...globalExecutionContext, // Inherit from global context
                     lastResult: null,
-                    variables: {}
+                    allToolResults: [] // To store results of all tools in the sequence
+                };
+                
+                // Helper function to check if port is still connected
+                const isPortConnected = () => {
+                    try {
+                        // Try to access port properties to check if it's still valid
+                        return port && port.name && !chrome.runtime.lastError;
+                    } catch (e) {
+                        return false;
+                    }
                 };
                 
                 for (let i = 0; i < toolMatches.length; i++) {
@@ -939,16 +1102,24 @@ Use this context when relevant to the user's request.`;
                         // Enhance tool arguments with context
                         const enhancedArgs = { ...toolCall.args };
                         
-                        // Auto-inject tabId for tools that need it
-                        if (executionContext.currentTabId && 
+                        // Auto-inject tabId for tools that need it (use global context)
+                        if (globalExecutionContext.currentTabId && 
                             ['searchWeb', 'getPageContent', 'stagehandAct', 'stagehandExtract', 'stagehandObserve', 'screenshot'].includes(toolCall.tool) &&
                             !enhancedArgs.tabId) {
-                            enhancedArgs.tabId = executionContext.currentTabId;
-                            console.log(`Auto-injected tabId ${executionContext.currentTabId} for ${toolCall.tool}`);
+                            enhancedArgs.tabId = globalExecutionContext.currentTabId;
+                            console.log(`✅ Auto-injected tabId ${globalExecutionContext.currentTabId} for ${toolCall.tool} from global context`);
+                        } else {
+                            console.log(`📋 Tool ${toolCall.tool} context:`, {
+                                hasGlobalTabId: !!globalExecutionContext.currentTabId,
+                                globalTabId: globalExecutionContext.currentTabId,
+                                hasProvidedTabId: !!enhancedArgs.tabId,
+                                providedTabId: enhancedArgs.tabId,
+                                needsTabId: ['searchWeb', 'getPageContent', 'stagehandAct', 'stagehandExtract', 'stagehandObserve', 'screenshot'].includes(toolCall.tool)
+                            });
                         }
                         
                         // Notify UI of tool execution start
-                        if (!isConnected) {
+                        if (!isPortConnected()) {
                             console.warn("executeSequentialTools: Port disconnected, cannot notify tool start.");
                             break;
                         } else {
@@ -963,7 +1134,6 @@ Use this context when relevant to the user's request.`;
                                 });
                             } catch (e) {
                                 console.warn('Error sending tool start notification:', e);
-                                isConnected = false;
                                 break;
                             }
                         }
@@ -975,21 +1145,33 @@ Use this context when relevant to the user's request.`;
                         // Update execution context based on tool result
                         if (toolResult.success) {
                             executionContext.lastResult = toolResult;
+                            executionContext.allToolResults.push({ tool: toolCall.tool, args: enhancedArgs, result: toolResult, success: true });
                             
-                            // Update tabId if tool returned one
+                            // Add to accumulated results for final response
+                            accumulatedToolResultsThisCycle.push({ tool: toolCall.tool, args: enhancedArgs, result: toolResult, success: true });
+                            
+                            // Update both local and global context if tool returned tabId
                             if (toolResult.tabId) {
                                 executionContext.currentTabId = toolResult.tabId;
-                                console.log(`Updated context tabId to: ${toolResult.tabId}`);
+                                globalExecutionContext.currentTabId = toolResult.tabId;
+                                
+                                // If it's a search result, also update lastSearchTabId
+                                if (toolCall.tool === 'searchWeb') {
+                                    globalExecutionContext.lastSearchTabId = toolResult.tabId;
+                                }
+                                
+                                console.log(`Updated both local and global context tabId to: ${toolResult.tabId}`);
                             }
                             
-                            // Store any variables from the result
+                            // Store any variables from the result in global context
                             if (toolResult.variables) {
                                 executionContext.variables = { ...executionContext.variables, ...toolResult.variables };
+                                globalExecutionContext.variables = { ...globalExecutionContext.variables, ...toolResult.variables };
                             }
                         }
                         
                         // Notify UI of tool completion with results
-                        if (!isConnected) {
+                        if (!isPortConnected()) {
                             console.warn("executeSequentialTools: Port disconnected, cannot notify tool completion.");
                             break;
                         } else {
@@ -1002,11 +1184,10 @@ Use this context when relevant to the user's request.`;
                                     status: 'completed',
                                     message: `Step ${currentStep}/${totalSteps}: ${getToolExecutionMessage(toolCall.tool, 'completed')}`,
                                     stepInfo: { currentStep, totalSteps, toolIndex: i + 1, totalTools: toolMatches.length },
-                                    context: { tabId: executionContext.currentTabId } // Include context in response
+                                    context: { tabId: globalExecutionContext.currentTabId } // Include global context in response
                                 });
                             } catch (e) {
                                 console.warn('Error sending tool completion notification:', e);
-                                isConnected = false;
                                 break;
                             }
                         }
@@ -1018,7 +1199,7 @@ Use this context when relevant to the user's request.`;
                         
                     } catch (error) {
                         console.error('Sequential tool execution error:', error);
-                        if (isConnected) {
+                        if (isPortConnected()) {
                             try {
                                 port.postMessage({
                                     type: 'tool_execution_inline',
@@ -1031,16 +1212,19 @@ Use this context when relevant to the user's request.`;
                                 });
                             } catch (e) {
                                 console.warn('Error sending tool error notification:', e);
-                                isConnected = false;
                             }
                         }
                         
                         // Stop execution on error
+                        executionContext.allToolResults.push({ tool: toolCall?.tool || 'unknown', args: toolCall?.args || {}, error: error.message, success: false });
+                        accumulatedToolResultsThisCycle.push({ tool: toolCall?.tool || 'unknown', args: toolCall?.args || {}, error: error.message, success: false });
                         break;
                     }
                 }
                 
                 console.log('Sequential tool execution completed. Final context:', executionContext);
+                console.log('Updated global context:', globalExecutionContext);
+                return executionContext; // Return the entire context
             }
 
             // Helper function for tool execution messages
@@ -1089,30 +1273,93 @@ Use this context when relevant to the user's request.`;
             }
 
             // Process based on client type
-            if (client instanceof AzureOpenAIClient) {
-                console.log('Starting Azure OpenAI streaming...');
-                const azureMessages = [
-                    { role: 'system', content: enhancedSystemMessage },
-                    { role: 'user', content: message.message }
-                ];
-                console.log('Azure streaming messages:', JSON.stringify({
-                    system: azureMessages[0].content.length + ' chars',
-                    user: azureMessages[1].content 
-                }));
-                await client.sendMessage({ messages: azureMessages }, processStreamChunk);
-            } else {
-                console.log('Starting Claude streaming...');
-                await client.sendMessage(message.message, processStreamChunk, enhancedSystemMessage);
+            let initialProcessingError = null;
+            try {
+                if (client instanceof AzureOpenAIClient) {
+                    console.log('Starting Azure OpenAI streaming...');
+                    const azureMessages = [
+                        { role: 'system', content: enhancedSystemMessage },
+                        { role: 'user', content: message.message }
+                    ];
+                    console.log('Azure streaming messages:', JSON.stringify({
+                        system: azureMessages[0].content.length + ' chars',
+                        user: azureMessages[1].content 
+                    }));
+                    await client.sendMessage({ messages: azureMessages }, processStreamChunk);
+                } else {
+                    console.log('Starting Claude streaming...');
+                    await client.sendMessage(message.message, processStreamChunk, enhancedSystemMessage);
+                }
+            } catch (err) {
+                initialProcessingError = err;
+                console.error("Error during initial AI processing stream:", err);
+                if (isConnected) {
+                    try {
+                        port.postMessage({ error: 'Error during initial AI processing: ' + err.message });
+                    } catch (e) {
+                        console.warn('Error sending initial processing error to port:', e);
+                        isConnected = false;
+                    }
+                }
             }
             
-            console.log('AI processing completed for message');
-            if (isConnected) {
+            console.log('Initial AI processing (including any tool calls) completed.');
+
+            if (initialProcessingError) {
+                 // If primary processing failed, don't attempt to send a final response or done signal beyond error already sent
+                return; 
+            }
+
+            // If tools were executed, now generate a final response based on their results
+            if (toolsWereExecutedInThisCycle && accumulatedToolResultsThisCycle.length > 0) {
+                console.log("Tools were executed. Generating final response based on results:", accumulatedToolResultsThisCycle);
+                
+                const finalResponseSystemMessage = getSystemMessage(context) + 
+                    `\n\nTOOL EXECUTION SUMMARY:\n${JSON.stringify(accumulatedToolResultsThisCycle, null, 2)}` + 
+                    "\n\nTASK: Provide a final, comprehensive answer to the user's original query based *only* on the information from the tool execution summary. Do not attempt to call any more tools. Summarize the findings and directly answer the user.";
+
+                const finalUserPrompt = `Based on the tool execution results (summarized in the system message), please provide the final answer to my original query: "${message.message}"`;
+
                 try {
-                    port.postMessage({ done: true });
-                } catch (e) {
-                    console.warn('Error sending final done signal:', e);
-                    isConnected = false;
+                    if (client instanceof AzureOpenAIClient) {
+                        const finalAzureMessages = [
+                            { role: 'system', content: finalResponseSystemMessage },
+                            { role: 'user', content: finalUserPrompt }
+                        ];
+                        await client.sendMessage({ messages: finalAzureMessages }, (finalChunk) => {
+                            if (!isConnected) return;
+                            if (finalChunk.done) {
+                                port.postMessage({ done: true });
+                            } else {
+                                port.postMessage({ type: 'delta', content: finalChunk.content || finalChunk.choices?.[0]?.delta?.content || '', role: 'assistant' });
+                            }
+                        });
+                    } else { // Claude or other
+                        await client.sendMessage(finalUserPrompt, (finalChunk) => {
+                            if (!isConnected) return;
+                            if (finalChunk.done) {
+                                port.postMessage({ done: true });
+                            } else {
+                                port.postMessage({ type: 'delta', content: finalChunk.content || '', role: 'assistant' });
+                            }
+                       }, finalResponseSystemMessage);
+                    }
+                    console.log('Final response streaming initiated and completed.');
+                } catch (finalResponseError) {
+                    console.error("Error streaming final AI response:", finalResponseError);
+                    if (isConnected) {
+                        try {
+                            port.postMessage({ error: 'Error generating final AI response: ' + finalResponseError.message });
+                        } catch (e) {
+                            console.warn('Error sending final response error to port:', e);
+                            isConnected = false;
+                        }
+                    }
                 }
+            } else if (isConnected) {
+                 // If no tools were executed or no results, just send the done signal from the initial processing.
+                console.log('No tools executed or no results to summarize, sending done signal from initial processing.');
+                port.postMessage({ done: true });
             }
             
         } catch (error) {
@@ -1176,22 +1423,86 @@ async function executeSearchWeb(args) {
     console.log('Starting web search:', {
         query: query,
         searchUrl: searchUrl,
-        tabId: tabId
+        providedTabId: tabId,
+        globalCurrentTabId: globalExecutionContext.currentTabId,
+        lastSearchTabId: globalExecutionContext.lastSearchTabId
     });
     
     try {
         let targetTabId;
         
+        // Priority 1: Use provided tabId
         if (tabId) {
-            console.log('Updating existing tab:', tabId);
-            await chrome.tabs.update(tabId, { url: searchUrl });
-            targetTabId = tabId;
-        } else {
-            console.log('Creating new tab for search');
+            console.log('Using provided tabId:', tabId);
+            try {
+                // Check if tab still exists
+                await chrome.tabs.get(tabId);
+                await chrome.tabs.update(tabId, { url: searchUrl });
+                targetTabId = tabId;
+                console.log('Successfully updated existing tab:', tabId);
+            } catch (error) {
+                console.log('Provided tab no longer exists, will create new tab');
+                targetTabId = null;
+            }
+        }
+        
+        // Priority 2: Use global current tab if it's a search tab
+        if (!targetTabId && globalExecutionContext.currentTabId) {
+            console.log('Checking if current tab can be reused:', globalExecutionContext.currentTabId);
+            try {
+                const currentTab = await chrome.tabs.get(globalExecutionContext.currentTabId);
+                if (currentTab && currentTab.url && currentTab.url.includes('google.com/search')) {
+                    console.log('Reusing current search tab:', globalExecutionContext.currentTabId);
+                    await chrome.tabs.update(globalExecutionContext.currentTabId, { url: searchUrl });
+                    targetTabId = globalExecutionContext.currentTabId;
+                }
+            } catch (error) {
+                console.log('Current tab no longer exists or cannot be reused');
+            }
+        }
+        
+        // Priority 3: Use last search tab if it still exists
+        if (!targetTabId && globalExecutionContext.lastSearchTabId) {
+            console.log('Checking if last search tab can be reused:', globalExecutionContext.lastSearchTabId);
+            try {
+                const lastSearchTab = await chrome.tabs.get(globalExecutionContext.lastSearchTabId);
+                if (lastSearchTab) {
+                    console.log('Reusing last search tab:', globalExecutionContext.lastSearchTabId);
+                    await chrome.tabs.update(globalExecutionContext.lastSearchTabId, { url: searchUrl });
+                    targetTabId = globalExecutionContext.lastSearchTabId;
+                }
+            } catch (error) {
+                console.log('Last search tab no longer exists');
+            }
+        }
+        
+        // Priority 4: Find any existing Google search tab
+        if (!targetTabId) {
+            console.log('Looking for any existing Google search tabs...');
+            try {
+                const tabs = await chrome.tabs.query({ url: '*://www.google.com/search*' });
+                if (tabs.length > 0) {
+                    const existingSearchTab = tabs[0];
+                    console.log('Found existing Google search tab:', existingSearchTab.id);
+                    await chrome.tabs.update(existingSearchTab.id, { url: searchUrl, active: true });
+                    targetTabId = existingSearchTab.id;
+                }
+            } catch (error) {
+                console.log('Error checking for existing search tabs:', error);
+            }
+        }
+        
+        // Priority 5: Create new tab only as last resort
+        if (!targetTabId) {
+            console.log('Creating new tab for search (no existing tabs found)');
             const tab = await chrome.tabs.create({ url: searchUrl });
             targetTabId = tab.id;
             console.log('Created new tab:', targetTabId);
         }
+        
+        // Update global context
+        globalExecutionContext.currentTabId = targetTabId;
+        globalExecutionContext.lastSearchTabId = targetTabId;
         
         // Wait for the page to load with timeout
         await new Promise((resolve, reject) => {
@@ -1239,7 +1550,8 @@ async function executeSearchWeb(args) {
             tabId: targetTabId, 
             url: searchUrl, 
             query,
-            message: `Search completed for: ${query}`
+            message: `Search completed for: ${query}`,
+            reusedTab: tabId === targetTabId
         };
         
         console.log('Search execution completed:', result);
@@ -1259,279 +1571,194 @@ async function executeOpenNewTab(args) {
 async function executeGetPageContent(args) {
     const { tabId } = args;
     
+    console.log('🔍 STARTING CONTENT EXTRACTION with args:', args);
+    
     let targetTabId = tabId;
     if (!targetTabId) {
+        console.log('⚠️ No tabId provided, looking for active tab...');
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         targetTabId = tabs[0]?.id;
+        console.log('📝 Found active tab ID:', targetTabId);
     }
     
     if (!targetTabId) {
-        throw new Error('No tab available for content extraction');
+        const error = 'No tab available for content extraction';
+        console.error('❌', error);
+        throw new Error(error);
     }
     
+    console.log('🎯 Target tab ID:', targetTabId);
+    
     try {
-        console.log('Extracting content from tab:', targetTabId);
-        
-        // First, check if the tab still exists and is accessible
+        // Verify tab exists and get its info
+        console.log('🔍 Checking if tab exists...');
         const tab = await chrome.tabs.get(targetTabId);
-        if (!tab) {
-            throw new Error('Target tab no longer exists');
+        console.log('✅ Tab found:', { 
+            id: tab.id, 
+            status: tab.status, 
+            url: tab.url, 
+            title: tab.title 
+        });
+        
+        // Simple wait for page to be ready
+        if (tab.status !== 'complete') {
+            console.log('⏳ Tab not complete, waiting 3 seconds...');
+            await new Promise(resolve => setTimeout(resolve, 3000));
         }
         
-        console.log('Tab status:', tab.status, 'URL:', tab.url);
-        
-        // Wait a bit more for dynamic content to load
+        // Additional wait for dynamic content
+        console.log('⏳ Waiting for dynamic content (2 seconds)...');
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        // Add timeout to script execution
+        console.log('🚀 Executing content extraction script...');
+        
+        // Simplified content extraction with timeout
         const results = await Promise.race([
             chrome.scripting.executeScript({
                 target: { tabId: targetTabId },
                 func: () => {
-                    try {
-                        console.log('Starting content extraction...');
-                        let content = '';
-                        let title = document.title || 'No title';
-                        let url = window.location.href || 'Unknown URL';
-                        let markdownContent = '';
+                    console.log('📄 Content extraction script running in page...');
+                    
+                    const result = {
+                        title: document.title || 'No title',
+                        url: window.location.href || 'Unknown URL',
+                        content: '',
+                        markdownContent: '',
+                        resultCount: 0,
+                        extractedAt: new Date().toISOString(),
+                        debug: {
+                            pageReady: document.readyState,
+                            bodyExists: !!document.body,
+                            isGoogle: window.location.href.includes('google.com/search')
+                        }
+                    };
+                    
+                    console.log('🌐 Page debug info:', result.debug);
+                    
+                    if (result.url.includes('google.com/search')) {
+                        console.log('🔍 Google search page detected');
                         
-                        if (url.includes('google.com/search')) {
-                            console.log('Extracting Google search results...');
-                            
-                            // Multiple selector strategies for Google search results
-                            const searchResults = [];
-                            
-                            // Try different selectors for search results
-                            const selectors = [
-                                'div[data-ved] h3',
-                                '.g h3',
-                                '.rc h3', 
-                                '.MjjYud h3',
-                                'h3[class*="LC20lb"]',
-                                'h3.LC20lb',
-                                '[data-header-feature] h3',
-                                '.yuRUbf h3'
-                            ];
-                            
-                            let resultElements = [];
-                            for (const selector of selectors) {
-                                const elements = document.querySelectorAll(selector);
-                                if (elements.length > 0) {
-                                    resultElements = Array.from(elements);
-                                    console.log(`Found ${elements.length} results with selector: ${selector}`);
-                                    break;
-                                }
+                        // Try to find search results
+                        const searchResults = [];
+                        const titleSelectors = ['.MjjYud h3', '.g h3', '.rc h3', 'h3.LC20lb'];
+                        
+                        let foundElements = [];
+                        for (const selector of titleSelectors) {
+                            const elements = document.querySelectorAll(selector);
+                            if (elements.length > 0) {
+                                foundElements = Array.from(elements);
+                                console.log(`✅ Found ${elements.length} elements with: ${selector}`);
+                                break;
                             }
-                            
-                            // If no results found with h3, try broader search
-                            if (resultElements.length === 0) {
-                                console.log('No h3 elements found, trying broader search...');
-                                const broadSelectors = [
-                                    '.g',
-                                    '.MjjYud',
-                                    '.rc',
-                                    '[data-ved]'
-                                ];
-                                
-                                for (const selector of broadSelectors) {
-                                    const containers = document.querySelectorAll(selector);
-                                    if (containers.length > 0) {
-                                        resultElements = Array.from(containers).map(container => {
-                                            return container.querySelector('h3, a[href*="http"]') || container;
-                                        }).filter(el => el);
-                                        console.log(`Found ${resultElements.length} results with container selector: ${selector}`);
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            console.log('Total result elements found:', resultElements.length);
-                            
-                            resultElements.forEach((element, index) => {
-                                if (index < 15) { // Increased to top 15 results
-                                    try {
-                                        let titleText = '';
-                                        let link = '';
-                                        let snippet = '';
-                                        
-                                        // Extract title
-                                        if (element.tagName === 'H3') {
-                                            titleText = element.textContent.trim();
-                                            const linkElement = element.closest('a') || element.querySelector('a');
-                                            link = linkElement ? linkElement.href : '';
-                                        } else {
-                                            const titleEl = element.querySelector('h3, a[href*="http"]');
-                                            if (titleEl) {
-                                                titleText = titleEl.textContent.trim();
-                                                if (titleEl.tagName === 'A') {
-                                                    link = titleEl.href;
-                                                } else {
-                                                    const linkEl = titleEl.closest('a') || titleEl.querySelector('a');
-                                                    link = linkEl ? linkEl.href : '';
-                                                }
-                                            }
-                                        }
-                                        
-                                        // Extract snippet from parent container
-                                        const container = element.closest('.g, .rc, [data-ved], .MjjYud, .yuRUbf') || element.parentElement;
-                                        if (container) {
-                                            // Look for snippet in various places
-                                            const snippetSelectors = [
-                                                '.VwiC3b',
-                                                '.s3v9rd',
-                                                '.st',
-                                                '[data-sncf]',
-                                                '.IsZvec'
-                                            ];
-                                            
-                                            for (const snippetSelector of snippetSelectors) {
-                                                const snippetEl = container.querySelector(snippetSelector);
-                                                if (snippetEl) {
-                                                    snippet = snippetEl.textContent.trim();
-                                                    break;
-                                                }
-                                            }
-                                            
-                                            // Fallback: look for any text content in spans/divs
-                                            if (!snippet) {
-                                                const textElements = container.querySelectorAll('span, div');
-                                                for (const el of textElements) {
-                                                    const text = el.textContent.trim();
-                                                    if (text.length > 50 && text.length < 800 && 
-                                                        !text.includes('http') && 
-                                                        !text.includes('›') &&
-                                                        !text.includes('...') &&
-                                                        text !== titleText) {
-                                                        snippet = text;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        
-                                        // Clean up the link
-                                        if (link && link.includes('/url?q=')) {
-                                            try {
-                                                const urlParams = new URLSearchParams(link.split('?')[1]);
-                                                link = urlParams.get('q') || link;
-                                            } catch (e) {
-                                                // Keep original link if parsing fails
-                                            }
-                                        }
-                                        
-                                        if (titleText && titleText.length > 3 && !titleText.includes('Search') && !titleText.includes('Google')) {
-                                            searchResults.push({
-                                                title: titleText,
-                                                link: link || 'No link available',
-                                                snippet: snippet || 'No snippet available',
-                                                index: index + 1
-                                            });
-                                        }
-                                    } catch (elementError) {
-                                        console.error('Error processing search result element:', elementError);
-                                    }
-                                }
-                            });
-                            
-                            console.log('Extracted search results:', searchResults.length);
-                            
-                            if (searchResults.length > 0) {
-                                // Create markdown formatted content
-                                markdownContent = `# Search Results for: ${decodeURIComponent(url.split('q=')[1]?.split('&')[0] || 'Unknown Query')}\n\n`;
-                                
-                                searchResults.forEach((result, index) => {
-                                    markdownContent += `## ${index + 1}. ${result.title}\n`;
-                                    markdownContent += `**Link:** ${result.link}\n\n`;
-                                    markdownContent += `${result.snippet}\n\n`;
-                                    markdownContent += `---\n\n`;
-                                });
-                                
-                                // Also create plain text version
-                                content = searchResults.map(result => 
-                                    `${result.index}. ${result.title}\nURL: ${result.link}\nDescription: ${result.snippet}\n---`
-                                ).join('\n\n');
-                            } else {
-                                console.log('No search results found, using fallback extraction');
-                                // Fallback to general text extraction
-                                const bodyText = document.body.textContent || '';
-                                content = bodyText.substring(0, 10000) || 'No content found';
-                                markdownContent = `# Page Content\n\n${content}`;
-                            }
-                        } else {
-                            console.log('Extracting regular page content...');
-                            // Regular page content extraction
-                            const bodyText = document.body.textContent || '';
-                            content = bodyText.substring(0, 50000) || 'No content found';
-                            
-                            // Create markdown version
-                            markdownContent = `# ${title}\n\n`;
-                            markdownContent += `**URL:** ${url}\n\n`;
-                            markdownContent += content;
                         }
                         
-                        const result = {
-                            title: title,
-                            url: url,
-                            content: content,
-                            markdownContent: markdownContent,
-                            html: document.documentElement.outerHTML.substring(0, 100000),
-                            extractedAt: new Date().toISOString(),
-                            resultCount: url.includes('google.com/search') ? (content.match(/---/g) || []).length : 0
-                        };
+                        console.log(`📊 Processing ${foundElements.length} elements`);
                         
-                        console.log('Content extraction completed:', {
-                            title: result.title,
-                            url: result.url,
-                            contentLength: result.content?.length || 0,
-                            markdownLength: result.markdownContent?.length || 0,
-                            resultCount: result.resultCount
+                        // Extract up to 10 results
+                        foundElements.slice(0, 10).forEach((titleEl, index) => {
+                            try {
+                                const title = titleEl.textContent?.trim();
+                                if (!title || title.length < 5) return;
+                                
+                                let link = '';
+                                const linkEl = titleEl.closest('a') || titleEl.parentElement?.querySelector('a');
+                                if (linkEl && linkEl.href) {
+                                    link = linkEl.href;
+                                    // Clean Google redirect URLs
+                                    if (link.includes('/url?q=')) {
+                                        const urlParams = new URLSearchParams(link.split('?')[1]);
+                                        link = urlParams.get('q') || link;
+                                    }
+                                }
+                                
+                                let snippet = '';
+                                const container = titleEl.closest('.g, .rc, .MjjYud') || titleEl.parentElement?.parentElement;
+                                if (container) {
+                                    const snippetEl = container.querySelector('.VwiC3b, .s3v9rd, .IsZvec, .st');
+                                    if (snippetEl) {
+                                        snippet = snippetEl.textContent?.trim() || '';
+                                    }
+                                }
+                                
+                                if (title && !title.toLowerCase().includes('google')) {
+                                    searchResults.push({
+                                        title,
+                                        link: link || 'No link',
+                                        snippet: snippet || 'No description',
+                                        index: searchResults.length + 1
+                                    });
+                                }
+                            } catch (e) {
+                                console.warn('Error processing element:', e);
+                            }
                         });
                         
-                        return result;
-                    } catch (extractionError) {
-                        console.error('Content extraction error:', extractionError);
-                        return {
-                            title: document.title || 'Error',
-                            url: window.location.href || 'Unknown',
-                            content: 'Error extracting content: ' + extractionError.message,
-                            markdownContent: '# Error\n\nFailed to extract content',
-                            html: '',
-                            error: extractionError.message
-                        };
+                        console.log(`✅ Extracted ${searchResults.length} search results`);
+                        
+                        if (searchResults.length > 0) {
+                            const query = new URLSearchParams(window.location.search).get('q') || 'Unknown Query';
+                            
+                            result.markdownContent = `# 🔍 Search Results for: "${query}"\n\n*Found ${searchResults.length} results*\n\n`;
+                            
+                            searchResults.forEach((item, index) => {
+                                result.markdownContent += `## ${index + 1}. ${item.title}\n`;
+                                result.markdownContent += `**🔗 Link:** ${item.link}\n\n`;
+                                result.markdownContent += `**📝 Description:** ${item.snippet}\n\n`;
+                                result.markdownContent += `---\n\n`;
+                            });
+                            
+                            result.content = searchResults.map(item => 
+                                `${item.index}. ${item.title}\nURL: ${item.link}\nDescription: ${item.snippet}`
+                            ).join('\n\n');
+                            
+                            result.resultCount = searchResults.length;
+                        } else {
+                            console.log('❌ No search results found, using page text');
+                            result.content = document.body?.textContent?.substring(0, 2000) || 'No content found';
+                            result.markdownContent = `# Page Content\n\n${result.content}`;
+                        }
+                    } else {
+                        console.log('📄 Regular page, extracting text content');
+                        result.content = document.body?.textContent?.substring(0, 5000) || 'No content found';
+                        result.markdownContent = `# ${result.title}\n\n**URL:** ${result.url}\n\n${result.content}`;
                     }
+                    
+                    console.log('✅ Content extraction completed in page');
+                    return result;
                 }
             }),
-            // Timeout after 15 seconds (increased for better extraction)
+            // 8 second timeout
             new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Content extraction timeout')), 15000)
+                setTimeout(() => reject(new Error('Content extraction timeout after 8 seconds')), 8000)
             )
         ]);
         
-        console.log('Content extraction successful:', {
-            title: results[0].result.title,
-            url: results[0].result.url,
-            contentLength: results[0].result.content?.length || 0,
-            markdownLength: results[0].result.markdownContent?.length || 0,
-            resultCount: results[0].result.resultCount
+        const extractionResult = results[0].result;
+        
+        console.log('🎉 Content extraction successful:', {
+            title: extractionResult.title,
+            url: extractionResult.url,
+            contentLength: extractionResult.content?.length || 0,
+            resultCount: extractionResult.resultCount
         });
         
         return {
             success: true,
             tabId: targetTabId,
-            ...results[0].result
+            ...extractionResult
         };
-    } catch (error) {
-        console.error('Content extraction failed:', error);
         
-        // Return a partial result instead of throwing
+    } catch (error) {
+        console.error('❌ Content extraction failed:', error.message);
+        console.error('Full error:', error);
+        
         return {
             success: false,
             tabId: targetTabId,
             title: 'Content Extraction Failed',
             url: 'Unknown',
             content: `Failed to extract content: ${error.message}`,
-            markdownContent: `# Content Extraction Failed\n\n${error.message}`,
-            html: '',
+            markdownContent: `# ❌ Content Extraction Failed\n\n**Error:** ${error.message}`,
             error: error.message
         };
     }
@@ -1981,12 +2208,28 @@ Let me break down this request:
 [THINKING:2/3]
 Now I'll execute the first tool: [tool name]
 {"tool": "toolName", "args": {"param": "value"}}
+
+After this tool executes, I will continue with the next step.
 [/THINKING]
 
-[After tool execution, continue thinking...]
 [THINKING:3/3]
-Based on the results, I now need to [next step or final response]
+Based on the tool results, I now need to [next step or analysis]
+{"tool": "getPageContent", "args": {}}
+
+Now I'll analyze the results and provide my final response.
 [/THINKING]
+
+<final_response>
+[Your comprehensive final response here, formatted in markdown]
+</final_response>
+
+CRITICAL WORKFLOW RULES:
+1. ALWAYS use sequential thinking with numbered steps [THINKING:X/Y]
+2. Execute ONE tool per thinking block
+3. After each tool execution, CONTINUE to the next thinking step
+4. Use the results from previous tools to inform next steps
+5. ALWAYS end with a comprehensive <final_response> section
+6. Tab context is automatically maintained between tools
 
 AVAILABLE TOOLS:
 
@@ -1996,100 +2239,120 @@ BASIC BROWSER TOOLS:
 - getPageContent(tabId?) - Extracts content from a web page (tabId auto-injected if available)
 
 ADVANCED STAGEHAND TOOLS:
-- stagehandNavigate(url) - Navigate to a URL in the browser. Use with confident URLs or start with https://google.com
-- stagehandAct(action, variables?) - Performs atomic actions on web elements (click, type, etc.)
+- stagehandNavigate(url) - Navigate to a URL in the browser
+- stagehandAct(action, variables?) - Performs atomic actions on web elements
 - stagehandExtract() - Extracts all text content from the current page
-- stagehandObserve(instruction) - Observes specific elements on the page for interaction
+- stagehandObserve(instruction) - Observes specific elements on the page
 - screenshot() - Takes a screenshot of the current page
 
 TOOL EXECUTION RULES:
 1. Use EXACT JSON format: {"tool": "toolName", "args": {"param": "value"}}
 2. Execute tools within THINKING blocks
-3. Wait for tool results before continuing
-4. Tab IDs are automatically passed between tools - you don't need to specify tabId manually
+3. Tab IDs are automatically passed between tools
+4. Wait for tool results before continuing to next step
 5. Use results to inform next steps
 
 CONTEXT AWARENESS:
 - When you open a new tab, that tab becomes the active context
-- Subsequent tools (searchWeb, getPageContent, etc.) automatically use the current tab
+- Subsequent tools automatically use the current tab
 - You can focus on the task logic rather than tab management
 
 INTELLIGENT SEARCH WORKFLOW:
-For search requests, follow this pattern:
-1. Use searchWeb to perform the search (this will automatically open Google and search)
-2. Use getPageContent to extract and analyze the search results
-3. Provide a comprehensive answer based on the extracted information
-
-CORRECTED EXAMPLES:
-
-Example 1 - Simple Search:
-User: "Search for today's top news"
+For search requests, follow this EXACT pattern:
 
 [THINKING:1/2]
-User wants me to search for today's top news.
-My plan:
-1. Search for "today's top news" 
-2. Extract and analyze the search results
-3. Provide a summary of the top news
+User wants [describe request]. I need to:
+1. Search for "[search query]"
+2. Extract the search results
+3. Analyze and present the findings
 [/THINKING]
 
 [THINKING:2/2]
-Step 1: Search for today's top news
+Executing search for [topic]:
+{"tool": "searchWeb", "args": {"query": "[search query]"}}
+
+Now extracting the search results:
+{"tool": "getPageContent", "args": {}}
+[/THINKING]
+
+<final_response>
+# 📰 [Topic] Results
+
+Based on my search and analysis, here are the key findings:
+
+## [Section 1]
+[Content based on extracted results]
+
+## [Section 2]
+[More content]
+
+## Summary
+[Key takeaways and analysis]
+</final_response>
+
+CRITICAL RESPONSE REQUIREMENTS:
+- ALWAYS provide a final response in <final_response> tags after tool execution
+- For search queries, analyze and summarize the extracted results
+- Present information in a clear, organized format with proper markdown
+- Include relevant details, links, and insights from the search results
+- Never end with just tool execution - always provide analysis and conclusions
+- Continue thinking after each tool execution until you have enough information
+
+EXAMPLE FOR NEWS SEARCH:
+
+[THINKING:1/2]
+User wants today's top news. I need to:
+1. Search for "today's top news"
+2. Extract the search results
+3. Analyze and present the findings
+[/THINKING]
+
+[THINKING:2/2]
+Executing search for today's top news:
 {"tool": "searchWeb", "args": {"query": "today's top news"}}
 
-Step 2: Extract and analyze the search results
+Now extracting the search results:
 {"tool": "getPageContent", "args": {}}
 [/THINKING]
 
-Based on the search results, here are today's top news stories...
+<final_response>
+# 📰 Today's Top News Headlines
 
-Example 2 - Open Tab and Search:
-User: "Open a new tab and search for AI news"
+Based on my search of current news, here are the most important stories:
 
-[THINKING:1/3]
-User wants me to open a new tab and search for AI news.
-My plan:
-1. Open a new tab with Google
-2. Search for "AI news" (will use the same tab)
-3. Extract and analyze results
-[/THINKING]
+## Breaking News
+### [Headline 1]
+**Source:** [Source name]
+[Summary of the story]
 
-[THINKING:2/3]
-Step 1: Open new tab with Google
-{"tool": "openNewTab", "args": {"url": "https://google.com"}}
-[/THINKING]
+### [Headline 2]
+**Source:** [Source name]
+[Summary of the story]
 
-[THINKING:3/3]
-Step 2: Search for AI news (using the opened tab)
-{"tool": "searchWeb", "args": {"query": "AI news"}}
+## Key Trends
+- [Important trend 1]
+- [Important trend 2]
 
-Step 3: Extract and analyze the search results
-{"tool": "getPageContent", "args": {}}
-[/THINKING]
-
-Here's what I found about AI news...
-
-STAGEHAND TOOL GUIDELINES:
-- stagehandAct: Use atomic actions like "Click the login button" or "Type 'hello' in search box"
-- stagehandObserve: Use before acting to find elements, e.g., "find the submit button"
-- stagehandExtract: Use for getting all page text content
-- screenshot: Use when you need to see the current page state
+## What You Need to Know
+[Analysis and key takeaways]
+</final_response>
 
 CRITICAL RULES:
 1. ALWAYS use sequential thinking for multi-step requests
-2. Execute tools in logical order
+2. Execute tools in logical order within thinking blocks
 3. Tab context is automatically maintained between tools
-4. Don't manually specify tabId unless targeting a specific different tab
-5. Use stagehandObserve before stagehandAct when unsure about elements
-6. Take screenshots when you need to see page state
-7. Use atomic actions in stagehandAct
-8. ALWAYS extract and analyze search results to provide intelligent answers
-9. Provide comprehensive responses based on actual search data
+4. CONTINUE thinking after each tool execution
+5. Use tool results to inform next steps
+6. ALWAYS extract and analyze search results to provide intelligent answers
+7. Provide comprehensive responses based on actual search data
+8. NEVER end without a <final_response> section - this is mandatory
+9. Format final responses with proper markdown for readability
+10. If a tool execution fails, continue with available information
 
 Current browser context:
 ${context}
 
-Remember: Think sequentially, use appropriate tools for each task, let the system handle tab context automatically, and always provide intelligent analysis of search results rather than just confirming the search was performed.`;
+Remember: Think sequentially, execute tools one at a time, continue thinking after each tool execution, and ALWAYS provide intelligent analysis of search results in a well-formatted <final_response> section. Your final response should be comprehensive, well-formatted, and directly address the user's request with the information you found.`;
 };
 
 // Update the message handling to use the new system message
@@ -2246,4 +2509,519 @@ function getClientForModel(config) {
         }
     }
     return null;
-} 
+}
+
+// Add manual tool execution test for debugging
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Add a test tool execution endpoint
+    if (request.type === 'TEST_TOOL_EXECUTION') {
+        console.log('🧪 MANUAL TOOL TEST TRIGGERED');
+        
+        // Test with a simple search
+        const testToolCall = {
+            tool: 'searchWeb',
+            args: { query: 'test search' }
+        };
+        
+        executeToolCall(testToolCall)
+            .then(result => {
+                console.log('✅ Manual tool test successful:', result);
+                sendResponse({ success: true, result });
+            })
+            .catch(error => {
+                console.error('❌ Manual tool test failed:', error);
+                sendResponse({ success: false, error: error.message });
+            });
+        
+        return true;
+    }
+    
+    // Add a test content extraction endpoint
+    if (request.type === 'TEST_CONTENT_EXTRACTION') {
+        console.log('🧪 MANUAL CONTENT EXTRACTION TEST TRIGGERED');
+        
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+            if (tabs.length === 0) {
+                sendResponse({ success: false, error: 'No active tab found' });
+                return;
+            }
+            
+            try {
+                const result = await executeGetPageContent({ tabId: tabs[0].id });
+                console.log('✅ Manual content extraction test successful:', result);
+                sendResponse({ success: true, result });
+            } catch (error) {
+                console.error('❌ Manual content extraction test failed:', error);
+                sendResponse({ success: false, error: error.message });
+            }
+        });
+        
+        return true;
+    }
+    
+    if (request.type === 'REGISTER_DYNAMIC_TOOL') {
+        try {
+            const { name, implementation } = request.tool;
+            // Create a safe sandbox for the tool
+            const toolFunction = new Function('args', `
+                with (args) {
+                    ${implementation}
+                }
+            `);
+            
+            dynamicTools.set(name, async (args) => {
+                try {
+                    return await toolFunction(args);
+                } catch (error) {
+                    console.error(`Error executing dynamic tool ${name}:`, error);
+                    throw error;
+                }
+            });
+            
+            sendResponse({ success: true });
+        } catch (error) {
+            console.error('Error registering dynamic tool:', error);
+            sendResponse({ error: error.message });
+        }
+        return true;
+    }
+
+    if (request.type === 'EXECUTE_DYNAMIC_TOOL') {
+        const { name, args } = request;
+        if (!dynamicTools.has(name)) {
+            sendResponse({ error: `Dynamic tool ${name} not found` });
+            return true;
+        }
+
+        dynamicTools.get(name)(args)
+            .then(result => sendResponse({ success: true, result }))
+            .catch(error => sendResponse({ error: error.message }));
+        return true;
+    }
+
+    if (request.type === 'EXECUTE_TOOL') {
+        const { tool, args } = request;
+        
+        executeToolCall({ tool, args })
+            .then(result => sendResponse(result))
+            .catch(error => sendResponse({ error: error.message }));
+        return true;
+    }
+
+    if (request.type === 'sendMessage') {
+        handleMessage(request, sender, sendResponse);
+        return true; // Keep the message channel open for streaming
+    }
+
+    if (request.type === 'GET_CONFIG') {
+        // Get configuration from storage
+        chrome.storage.local.get(['configContent'], (result) => {
+            try {
+                console.log('Retrieved config from storage:', result); // Debug log
+                
+                if (!result.configContent) {
+                    console.warn('No configuration found in storage');
+                    sendResponse({});
+                    return;
+                }
+
+                const config = JSON.parse(result.configContent);
+                console.log('Parsed configuration:', config); // Debug log
+
+                // Validate the configuration structure
+                if (!config.AzureOpenAi && !config.ClaudeAi) {
+                    console.warn('Configuration missing AI model settings');
+                    sendResponse({});
+                    return;
+                }
+
+                // Add selected model from storage if available
+                chrome.storage.local.get(['selectedModel'], (modelResult) => {
+                    if (modelResult.selectedModel) {
+                        config.selectedModel = modelResult.selectedModel;
+                    }
+                    console.log('Sending configuration to client:', config); // Debug log
+                    sendResponse(config);
+                });
+            } catch (error) {
+                console.error('Error parsing config:', error);
+                sendResponse({ error: error.message });
+            }
+        });
+        return true; // Keep the message channel open for async response
+    }
+
+    if (request.type === 'PROCESS_MESSAGE') {
+        // Process the message using the selected model
+        processMessage(request.message, request.modelId)
+            .then(response => sendResponse(response))
+            .catch(error => sendResponse({ error: error.message }));
+        return true; // Keep the message channel open for async response
+    }
+
+    if (request.type === 'OPEN_OPTIONS') {
+        // Open the options page
+        chrome.runtime.openOptionsPage();
+        sendResponse({ success: true });
+        return true;
+    }
+
+    if (request.type === 'SAVE_CONFIG') {
+        // Save configuration to storage
+        chrome.storage.sync.set({ config: request.config }, () => {
+            sendResponse({ success: true });
+        });
+        return true; // Keep the message channel open for async response
+    }
+
+    switch (request.type) {
+        case 'GET_PAGE_INFO':
+            // Get current page information
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                const tab = tabs[0];
+                sendResponse({
+                    url: tab.url,
+                    title: tab.title
+                });
+            });
+            return true;
+
+        case 'GET_TAB_INFO':
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                const tab = tabs[0];
+                sendResponse({ id: tab.id, url: tab.url, title: tab.title });
+            });
+            return true;
+
+        case 'GET_PAGE_HTML':
+            chrome.scripting
+                .executeScript({
+                    target: { tabId: sender.tab.id },
+                    func: () => document.documentElement.outerHTML
+                })
+                .then((res) => sendResponse({ html: res[0].result }))
+                .catch((err) => sendResponse({ error: err.message }));
+            return true;
+
+        case 'OPEN_TAB':
+            chrome.tabs.create({ url: request.url || 'about:blank' }, (tab) => {
+                sendResponse({ success: true, tabId: tab.id });
+            });
+            return true;
+
+        case 'SEARCH_WEB':
+            const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(request.query || '')}`;
+            if (request.tabId) {
+                chrome.tabs.update(request.tabId, { url: searchUrl }, () => {
+                    sendResponse({ success: true, tabId: request.tabId });
+                });
+            } else {
+                chrome.tabs.create({ url: searchUrl }, (tab) => {
+                    sendResponse({ success: true, tabId: tab.id });
+                });
+            }
+            return true;
+
+        case 'EXECUTE_ACTION':
+            // Handle action execution requests
+            handleActionExecution(request.action, sender.tab.id)
+                .then(result => sendResponse(result))
+                .catch(error => sendResponse({ error: error.message }));
+            return true;
+
+        case 'VALIDATE_PAGE':
+            // Handle page validation requests
+            validatePageState(request.requirements, sender.tab.id)
+                .then(result => sendResponse(result))
+                .catch(error => sendResponse({ error: error.message }));
+            return true;
+
+        case 'OPEN_SIDEBAR':
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                const tab = tabs[0];
+                if (!tab || !isInjectableUrl(tab.url)) return;
+
+                const domain = new URL(tab.url).hostname;
+                chrome.tabs.sendMessage(tab.id, { type: 'SHOW_SIDEBAR_ONCE' }, () => {
+                    if (chrome.runtime.lastError) {
+                        injectEnhancedSidebar(tab.id, domain);
+                    }
+                });
+            });
+            return true;
+
+        case 'SIDEBAR_READY':
+            // Sidebar is ready, update the icon state if needed
+            chrome.action.setIcon({
+                path: {
+                    16: 'icons/icon16.png',
+                    48: 'icons/icon48.png',
+                    128: 'icons/icon128.png'
+                },
+                tabId: sender.tab.id
+            });
+            return true;
+    }
+});
+
+// Add manual tool execution test for debugging
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Add a test content extraction endpoint
+    if (request.type === 'TEST_CONTENT_EXTRACTION') {
+        console.log('🧪 MANUAL CONTENT EXTRACTION TEST TRIGGERED');
+        
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+            if (tabs.length === 0) {
+                sendResponse({ success: false, error: 'No active tab found' });
+                return;
+            }
+            
+            try {
+                const result = await executeGetPageContent({ tabId: tabs[0].id });
+                console.log('✅ Manual content extraction test successful:', result);
+                sendResponse({ success: true, result });
+            } catch (error) {
+                console.error('❌ Manual content extraction test failed:', error);
+                sendResponse({ success: false, error: error.message });
+            }
+        });
+        
+        return true;
+    }
+    
+    // Add a test search and extract endpoint
+    if (request.type === 'TEST_SEARCH_AND_EXTRACT') {
+        console.log('🧪 MANUAL SEARCH AND EXTRACT TEST TRIGGERED');
+        
+        (async () => {
+            try {
+                console.log('Step 1: Executing search...');
+                const searchResult = await executeSearchWeb({ query: 'today news' });
+                console.log('Search result:', searchResult);
+                
+                if (searchResult.success && searchResult.tabId) {
+                    console.log('Step 2: Waiting for page to load...');
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+                    
+                    console.log('Step 3: Extracting content...');
+                    const extractResult = await executeGetPageContent({ tabId: searchResult.tabId });
+                    console.log('Extract result:', extractResult);
+                    
+                    sendResponse({ 
+                        success: true, 
+                        searchResult, 
+                        extractResult,
+                        message: 'Search and extract test completed'
+                    });
+                } else {
+                    sendResponse({ 
+                        success: false, 
+                        error: 'Search failed',
+                        searchResult 
+                    });
+                }
+            } catch (error) {
+                console.error('❌ Search and extract test failed:', error);
+                sendResponse({ success: false, error: error.message });
+            }
+        })();
+        
+        return true;
+    }
+
+    // Add a comprehensive workflow test
+    if (request.type === 'TEST_FULL_WORKFLOW') {
+        console.log('🧪 FULL WORKFLOW TEST TRIGGERED');
+        
+        (async () => {
+            try {
+                console.log('=== FULL WORKFLOW TEST START ===');
+                
+                // Step 1: Test search
+                console.log('Step 1: Testing search...');
+                const searchResult = await executeSearchWeb({ query: 'test news today' });
+                console.log('✅ Search result:', searchResult);
+                
+                if (!searchResult.success) {
+                    throw new Error('Search failed: ' + JSON.stringify(searchResult));
+                }
+                
+                // Step 2: Wait for page load
+                console.log('Step 2: Waiting for page to load...');
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                
+                // Step 3: Test content extraction
+                console.log('Step 3: Testing content extraction...');
+                const extractResult = await executeGetPageContent({ tabId: searchResult.tabId });
+                console.log('✅ Extract result summary:', {
+                    success: extractResult.success,
+                    title: extractResult.title,
+                    url: extractResult.url,
+                    contentLength: extractResult.content?.length || 0,
+                    markdownLength: extractResult.markdownContent?.length || 0,
+                    resultCount: extractResult.resultCount,
+                    hasError: !!extractResult.error
+                });
+                
+                if (!extractResult.success) {
+                    console.warn('⚠️ Content extraction failed but continuing test...');
+                }
+                
+                // Step 4: Test tool result accumulation
+                console.log('Step 4: Testing tool result accumulation...');
+                const mockToolResults = [
+                    { tool: 'searchWeb', args: { query: 'test news today' }, result: searchResult, success: true },
+                    { tool: 'getPageContent', args: { tabId: searchResult.tabId }, result: extractResult, success: extractResult.success }
+                ];
+                
+                console.log('✅ Mock tool results created:', mockToolResults.length, 'tools');
+                
+                // Step 5: Test final response system message generation
+                console.log('Step 5: Testing final response system message...');
+                const context = 'Test context for workflow';
+                const finalResponseSystemMessage = getSystemMessage(context) + 
+                    `\n\nTOOL EXECUTION SUMMARY:\n${JSON.stringify(mockToolResults, null, 2)}` + 
+                    "\n\nTASK: Provide a final, comprehensive answer to the user's original query based *only* on the information from the tool execution summary. Do not attempt to call any more tools. Summarize the findings and directly answer the user.";
+                
+                console.log('✅ Final response system message length:', finalResponseSystemMessage.length);
+                
+                // Step 6: Test final user prompt
+                console.log('Step 6: Testing final user prompt...');
+                const finalUserPrompt = `Based on the tool execution results (summarized in the system message), please provide the final answer to my original query: "test news today"`;
+                console.log('✅ Final user prompt:', finalUserPrompt);
+                
+                console.log('=== FULL WORKFLOW TEST COMPLETED SUCCESSFULLY ===');
+                
+                sendResponse({ 
+                    success: true, 
+                    message: 'Full workflow test completed successfully',
+                    results: {
+                        searchResult,
+                        extractResult,
+                        mockToolResults,
+                        systemMessageLength: finalResponseSystemMessage.length,
+                        finalUserPrompt
+                    }
+                });
+                
+            } catch (error) {
+                console.error('❌ Full workflow test failed:', error);
+                sendResponse({ 
+                    success: false, 
+                    error: error.message,
+                    stack: error.stack
+                });
+            }
+        })();
+        
+        return true;
+    }
+
+    // Add a simple news query test
+    if (request.type === 'TEST_NEWS_WORKFLOW') {
+        console.log('🧪 NEWS WORKFLOW TEST TRIGGERED');
+        
+        (async () => {
+            try {
+                console.log('=== NEWS WORKFLOW TEST START ===');
+                
+                // Step 1: Search for today's top news
+                console.log('Step 1: Searching for today\'s top news...');
+                const searchResult = await executeSearchWeb({ query: "today's top news" });
+                console.log('✅ Search completed:', {
+                    success: searchResult.success,
+                    tabId: searchResult.tabId,
+                    url: searchResult.url
+                });
+                
+                if (!searchResult.success) {
+                    throw new Error('Search failed: ' + JSON.stringify(searchResult));
+                }
+                
+                // Step 2: Wait for page to load
+                console.log('Step 2: Waiting for Google search page to load...');
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                
+                // Step 3: Extract content from search results
+                console.log('Step 3: Extracting search results...');
+                const extractResult = await executeGetPageContent({ tabId: searchResult.tabId });
+                console.log('✅ Content extraction completed:', {
+                    success: extractResult.success,
+                    title: extractResult.title,
+                    contentLength: extractResult.content?.length || 0,
+                    markdownLength: extractResult.markdownContent?.length || 0,
+                    resultCount: extractResult.resultCount,
+                    hasError: !!extractResult.error
+                });
+                
+                // Step 4: Simulate tool results accumulation
+                const toolResults = [
+                    { tool: 'searchWeb', args: { query: "today's top news" }, result: searchResult, success: true },
+                    { tool: 'getPageContent', args: { tabId: searchResult.tabId }, result: extractResult, success: extractResult.success }
+                ];
+                
+                console.log('✅ Tool results accumulated:', toolResults.length, 'tools');
+                
+                // Step 5: Test final response generation
+                console.log('Step 5: Testing final response generation...');
+                const context = 'Test context for news workflow';
+                const finalResponseSystemMessage = getSystemMessage(context) + 
+                    `\n\nTOOL EXECUTION SUMMARY:\n${JSON.stringify(toolResults, null, 2)}` + 
+                    "\n\nTASK: Provide a final, comprehensive answer to the user's original query based *only* on the information from the tool execution summary. Do not attempt to call any more tools. Summarize the findings and directly answer the user.";
+                
+                const finalUserPrompt = `Based on the tool execution results (summarized in the system message), please provide the final answer to my original query: "Can you give me today's top news"`;
+                
+                console.log('✅ Final response prompts prepared');
+                console.log('System message length:', finalResponseSystemMessage.length);
+                console.log('User prompt:', finalUserPrompt);
+                
+                console.log('=== NEWS WORKFLOW TEST COMPLETED SUCCESSFULLY ===');
+                
+                sendResponse({ 
+                    success: true, 
+                    message: 'News workflow test completed successfully',
+                    results: {
+                        searchResult,
+                        extractResult,
+                        toolResults,
+                        systemMessageLength: finalResponseSystemMessage.length,
+                        finalUserPrompt,
+                        extractedContent: extractResult.markdownContent?.substring(0, 500) + '...' || 'No content'
+                    }
+                });
+                
+            } catch (error) {
+                console.error('❌ News workflow test failed:', error);
+                sendResponse({ 
+                    success: false, 
+                    error: error.message,
+                    stack: error.stack
+                });
+            }
+        })();
+        
+        return true;
+    }
+
+    // Add debug endpoints for global context management
+    if (request.type === 'DEBUG_GLOBAL_CONTEXT') {
+        console.log('🧪 DEBUG: Current global context:', globalExecutionContext);
+        sendResponse({ 
+            success: true, 
+            globalContext: globalExecutionContext,
+            message: 'Global context retrieved'
+        });
+        return true;
+    }
+    
+    if (request.type === 'RESET_GLOBAL_CONTEXT') {
+        console.log('🧪 DEBUG: Manually resetting global context');
+        resetGlobalContext();
+        sendResponse({ 
+            success: true, 
+            globalContext: globalExecutionContext,
+            message: 'Global context reset successfully'
+        });
+        return true;
+    }
+});

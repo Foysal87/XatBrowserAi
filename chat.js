@@ -41,6 +41,9 @@ class ModernChatUI {
             this.log(this.logLevels.ERROR, 'Failed to load configuration', { error: error.message });
             this.showNotification('Error loading configuration. Please check your settings.', 'error');
         });
+        
+        // Setup debug functions for console testing
+        this.setupDebugFunctions();
     }
 
     initializeElements() {
@@ -564,15 +567,47 @@ class ModernChatUI {
                         
                         const messageContent = assistantMessageDiv.querySelector('.message-content');
                         if (messageContent) {
-                            // Update the final response section
-                            let finalResponseDiv = messageContent.querySelector('.final-response');
-                            if (!finalResponseDiv) {
-                                finalResponseDiv = document.createElement('div');
-                                finalResponseDiv.className = 'final-response';
-                                messageContent.appendChild(finalResponseDiv);
+                            // Check for final response pattern in the accumulated content
+                            const finalResponseMatch = fullResponse.match(/<final_response>(.*?)<\/final_response>/s);
+                            if (finalResponseMatch) {
+                                const [fullMatch, finalResponseContent] = finalResponseMatch;
+                                
+                                // Create or update final response section
+                                let finalResponseDiv = messageContent.querySelector('.final-response');
+                                if (!finalResponseDiv) {
+                                    finalResponseDiv = document.createElement('div');
+                                    finalResponseDiv.className = 'final-response';
+                                    messageContent.appendChild(finalResponseDiv);
+                                }
+                                
+                                // Format the final response content with markdown
+                                finalResponseDiv.innerHTML = this.parseBasicMarkdown(finalResponseContent.trim());
+                                this.addCopyButtonsToCodeBlocks(finalResponseDiv);
+                                
+                                // Remove final response content from fullResponse to avoid duplication
+                                fullResponse = fullResponse.replace(fullMatch, '');
+                            } else {
+                                // Update the regular content section (for non-final response content)
+                                let regularContentDiv = messageContent.querySelector('.regular-content');
+                                if (!regularContentDiv) {
+                                    regularContentDiv = document.createElement('div');
+                                    regularContentDiv.className = 'regular-content';
+                                    // Insert before final response if it exists
+                                    const finalResponseDiv = messageContent.querySelector('.final-response');
+                                    if (finalResponseDiv) {
+                                        messageContent.insertBefore(regularContentDiv, finalResponseDiv);
+                                    } else {
+                                        messageContent.appendChild(regularContentDiv);
+                                    }
+                                }
+                                
+                                // Only show non-final response content in regular section
+                                const contentWithoutFinalResponse = fullResponse.replace(/<final_response>.*?<\/final_response>/s, '');
+                                if (contentWithoutFinalResponse.trim()) {
+                                    regularContentDiv.innerHTML = this.parseBasicMarkdown(contentWithoutFinalResponse);
+                                    this.addCopyButtonsToCodeBlocks(regularContentDiv);
+                                }
                             }
-                            finalResponseDiv.innerHTML = this.parseBasicMarkdown(fullResponse);
-                            this.addCopyButtonsToCodeBlocks(finalResponseDiv);
                         }
                         
                         this.scrollToBottom();
@@ -859,6 +894,27 @@ class ModernChatUI {
             this.currentContent = this.currentContent.replace(fullMatch, '');
         }
         
+        // Check for final response pattern
+        const finalResponseMatch = this.currentContent.match(/<final_response>(.*?)<\/final_response>/s);
+        if (finalResponseMatch) {
+            const [fullMatch, finalResponseContent] = finalResponseMatch;
+            
+            // Create or update final response section
+            let finalResponseDiv = contentDiv.querySelector('.final-response');
+            if (!finalResponseDiv) {
+                finalResponseDiv = document.createElement('div');
+                finalResponseDiv.className = 'final-response';
+                contentDiv.appendChild(finalResponseDiv);
+            }
+            
+            // Format the final response content with markdown
+            finalResponseDiv.innerHTML = this.parseBasicMarkdown(finalResponseContent.trim());
+            this.addCopyButtonsToCodeBlocks(finalResponseDiv);
+            
+            // Remove final response content from main content
+            this.currentContent = this.currentContent.replace(fullMatch, '');
+        }
+        
         // Check for tool execution patterns
         const toolMatch = this.currentContent.match(/\[TOOL:(.*?)\](.*?)\[\/TOOL\]/s);
         if (toolMatch) {
@@ -869,24 +925,26 @@ class ModernChatUI {
             this.currentContent = this.currentContent.replace(fullMatch, '');
         }
         
-        // Use marked.js for markdown parsing if available
-        let formattedContent;
-        if (typeof marked !== 'undefined') {
-            formattedContent = marked.parse(this.currentContent);
-        } else {
-            // Fallback to basic markdown formatting
-            formattedContent = this.parseBasicMarkdown(this.currentContent);
+        // Format any remaining content in a regular content section
+        if (this.currentContent.trim()) {
+            // Create or update regular content section
+            let regularContentDiv = contentDiv.querySelector('.regular-content');
+            if (!regularContentDiv) {
+                regularContentDiv = document.createElement('div');
+                regularContentDiv.className = 'regular-content';
+                
+                // Insert before final response if it exists, otherwise append
+                const finalResponseDiv = contentDiv.querySelector('.final-response');
+                if (finalResponseDiv) {
+                    contentDiv.insertBefore(regularContentDiv, finalResponseDiv);
+                } else {
+                    contentDiv.appendChild(regularContentDiv);
+                }
+            }
+            
+            regularContentDiv.innerHTML = this.parseBasicMarkdown(this.currentContent);
+            this.addCopyButtonsToCodeBlocks(regularContentDiv);
         }
-        
-        contentDiv.innerHTML = formattedContent;
-        
-        // Highlight code blocks if Prism is available
-        if (typeof Prism !== 'undefined') {
-            Prism.highlightAllUnder(contentDiv);
-        }
-        
-        // Add copy buttons to code blocks
-        this.addCopyButtonsToCodeBlocks(contentDiv);
         
         this.scrollToBottom();
     }
@@ -1219,8 +1277,14 @@ class ModernChatUI {
                 const contentLength = result.content?.length || result.markdownContent?.length || 0;
                 const resultCount = result.resultCount || 0;
                 const contentTabInfo = result.tabId ? ` from tab ${result.tabId}` : '';
+                
                 if (resultCount > 0) {
-                    return `<div class="tool-result">✅ Extracted ${resultCount} search results (${contentLength} characters)${contentTabInfo}</div>`;
+                    // For search results, show a preview of the extracted content
+                    const preview = this.createSearchResultsPreview(result);
+                    return `<div class="tool-result">
+                        ✅ Extracted ${resultCount} search results (${contentLength} characters)${contentTabInfo}
+                        ${preview}
+                    </div>`;
                 } else {
                     return `<div class="tool-result">✅ Page content extracted (${contentLength} characters)${contentTabInfo}</div>`;
                 }
@@ -1253,6 +1317,26 @@ class ModernChatUI {
             default:
                 return `<div class="tool-result">✅ ${toolName} completed successfully</div>`;
         }
+    }
+
+    createSearchResultsPreview(result) {
+        if (!result.markdownContent && !result.content) return '';
+        
+        // Extract first few search results for preview
+        const content = result.markdownContent || result.content;
+        const lines = content.split('\n').slice(0, 10); // First 10 lines
+        const preview = lines.join('\n');
+        
+        return `<div class="search-results-preview">
+            <details style="margin-top: 0.5rem;">
+                <summary style="cursor: pointer; color: var(--primary); font-weight: 500;">
+                    📋 Preview extracted results
+                </summary>
+                <div style="margin-top: 0.5rem; padding: 0.75rem; background: var(--bg-secondary); border-radius: 8px; font-size: 0.8rem; max-height: 200px; overflow-y: auto;">
+                    <pre style="white-space: pre-wrap; margin: 0; color: var(--text-secondary);">${this.escapeHtml(preview)}${content.length > preview.length ? '\n...' : ''}</pre>
+                </div>
+            </details>
+        </div>`;
     }
 
     removeStreamingIndicator() {
@@ -1635,6 +1719,81 @@ class ModernChatUI {
                 chatItem.textContent = thread.preview;
             }
         }
+    }
+
+    // Debug test functions for console access
+    setupDebugFunctions() {
+        // Make debug functions available globally for console testing
+        window.debugXatBrowser = {
+            testContentExtraction: () => {
+                console.log('🧪 Testing content extraction...');
+                chrome.runtime.sendMessage({ type: 'TEST_CONTENT_EXTRACTION' }, (response) => {
+                    console.log('Content extraction test result:', response);
+                });
+            },
+            
+            testSearchAndExtract: () => {
+                console.log('🧪 Testing search and extract...');
+                chrome.runtime.sendMessage({ type: 'TEST_SEARCH_AND_EXTRACT' }, (response) => {
+                    console.log('Search and extract test result:', response);
+                });
+            },
+            
+            testFullWorkflow: () => {
+                console.log('🧪 Testing full workflow...');
+                chrome.runtime.sendMessage({ type: 'TEST_FULL_WORKFLOW' }, (response) => {
+                    console.log('Full workflow test result:', response);
+                });
+            },
+            
+            testNewsWorkflow: () => {
+                console.log('🧪 Testing news workflow specifically...');
+                chrome.runtime.sendMessage({ type: 'TEST_NEWS_WORKFLOW' }, (response) => {
+                    console.log('News workflow test result:', response);
+                    if (response.success && response.results.extractedContent) {
+                        console.log('Extracted content preview:', response.results.extractedContent);
+                    }
+                });
+            },
+            
+            debugGlobalContext: () => {
+                console.log('🧪 Checking global context...');
+                chrome.runtime.sendMessage({ type: 'DEBUG_GLOBAL_CONTEXT' }, (response) => {
+                    console.log('Global context:', response);
+                });
+            },
+            
+            resetGlobalContext: () => {
+                console.log('🧪 Resetting global context...');
+                chrome.runtime.sendMessage({ type: 'RESET_GLOBAL_CONTEXT' }, (response) => {
+                    console.log('Reset result:', response);
+                });
+            },
+            
+            simulateNewsQuery: () => {
+                console.log('🧪 Simulating news query...');
+                const messageInput = document.querySelector('.message-input');
+                if (messageInput) {
+                    messageInput.value = 'Can you give me today\'s top news?';
+                    const sendButton = document.querySelector('.send-button');
+                    if (sendButton) {
+                        sendButton.click();
+                    }
+                } else {
+                    console.error('Message input not found');
+                }
+            }
+        };
+        
+        console.log('🔧 Debug functions available: window.debugXatBrowser');
+        console.log('Available functions:');
+        console.log('- debugXatBrowser.testContentExtraction()');
+        console.log('- debugXatBrowser.testSearchAndExtract()');
+        console.log('- debugXatBrowser.testFullWorkflow()');
+        console.log('- debugXatBrowser.testNewsWorkflow()');
+        console.log('- debugXatBrowser.debugGlobalContext()');
+        console.log('- debugXatBrowser.resetGlobalContext()');
+        console.log('- debugXatBrowser.simulateNewsQuery()');
     }
 }
 
